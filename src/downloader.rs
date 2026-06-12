@@ -7,8 +7,9 @@ use crossterm::{
     terminal::{Clear, ClearType},
 };
 use owo_colors::OwoColorize;
+use std::collections::HashSet;
 use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::Semaphore;
@@ -80,6 +81,17 @@ pub struct DownloadProgress {
     pub completed_songs: usize,
     pub tasks: Vec<SongProgress>,
     pub errors: Vec<String>,
+}
+
+struct SongDownloadJob {
+    album_path: PathBuf,
+    song: SongDetail,
+    album: AlbumDetail,
+    config: Config,
+    current: usize,
+    total: usize,
+    cover_data: Option<Vec<u8>>,
+    progress: Option<Arc<Mutex<DownloadProgress>>>,
 }
 
 pub async fn download_album(
@@ -188,13 +200,18 @@ pub async fn download_album_with_progress(
     let semaphore = Arc::new(Semaphore::new(concurrency));
     let total = album.songs.len();
 
-    let mut handles = Vec::new();
-
+    let mut song_details = Vec::with_capacity(total);
     for (idx, song_brief) in album.songs.iter().enumerate() {
         let song_detail = api.get_song(&song_brief.cid).await?;
-
         set_progress_status(&progress, idx + 1, &song_detail.name, SongStatus::Queued);
+        song_details.push((idx, song_detail));
+    }
 
+    validate_song_destinations(config, &album_path, &song_details)?;
+
+    let mut handles = Vec::new();
+
+    for (idx, song_detail) in song_details {
         let api_clone = api.clone();
         let album_path_clone = album_path.clone();
         let config_clone = config.clone();
@@ -208,14 +225,16 @@ pub async fn download_album_with_progress(
 
             download_song_with_progress(
                 &api_clone,
-                &album_path_clone,
-                &song_detail,
-                &album_clone,
-                &config_clone,
-                idx + 1,
-                total,
-                cover_data_clone.as_deref(),
-                progress_clone,
+                SongDownloadJob {
+                    album_path: album_path_clone,
+                    song: song_detail,
+                    album: album_clone,
+                    config: config_clone,
+                    current: idx + 1,
+                    total,
+                    cover_data: cover_data_clone,
+                    progress: progress_clone,
+                },
             )
             .await
         });
@@ -257,9 +276,28 @@ fn create_album_path(config: &Config, album: &AlbumDetail) -> anyhow::Result<Pat
         .naming
         .album_folder
         .replace("{album_name}", &sanitize(&album.name));
-    let path = config.download.output_dir.join(folder_name);
+    let path = safe_join_child(&config.download.output_dir, &folder_name)?;
     std::fs::create_dir_all(&path)?;
     Ok(path)
+}
+
+fn validate_song_destinations(
+    config: &Config,
+    album_path: &Path,
+    songs: &[(usize, SongDetail)],
+) -> anyhow::Result<()> {
+    let mut seen = HashSet::new();
+    for (_, song) in songs {
+        let path = build_song_path(config, album_path, song)?;
+        if !seen.insert(path.clone()) {
+            anyhow::bail!(
+                "duplicate output path for song {}: {}",
+                song.name,
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn update_progress(
@@ -439,7 +477,7 @@ async fn download_covers(
     let mut cover_data: Option<Vec<u8>> = None;
 
     let ext = ext_from_url(&album.cover_url);
-    let dest = path.join(format!("{}_Cover.{}", album_name, ext));
+    let dest = safe_join_child(path, &format!("{}_Cover.{}", album_name, ext))?;
     if !dest.exists() {
         if let Err(e) = api.download_file(&album.cover_url, &dest).await {
             eprintln!(
@@ -455,7 +493,7 @@ async fn download_covers(
     }
 
     let ext = ext_from_url(&album.cover_de_url);
-    let dest = path.join(format!("{}_CoverDe.{}", album_name, ext));
+    let dest = safe_join_child(path, &format!("{}_CoverDe.{}", album_name, ext))?;
     if !dest.exists() {
         if let Err(e) = api.download_file(&album.cover_de_url, &dest).await {
             eprintln!(
@@ -469,35 +507,36 @@ async fn download_covers(
     Ok(cover_data)
 }
 
-async fn download_song_with_progress(
-    api: &ApiClient,
-    path: &Path,
-    song: &SongDetail,
-    album: &AlbumDetail,
-    config: &Config,
-    current: usize,
-    total: usize,
-    cover_data: Option<&[u8]>,
-    progress: Option<Arc<Mutex<DownloadProgress>>>,
-) -> anyhow::Result<()> {
-    let dest = build_song_path(config, path, song)?;
+async fn download_song_with_progress(api: &ApiClient, job: SongDownloadJob) -> anyhow::Result<()> {
+    let SongDownloadJob {
+        album_path,
+        song,
+        album,
+        config,
+        current,
+        total,
+        cover_data,
+        progress,
+    } = job;
 
-    let downloaded = download_audio_file(api, song, &dest, current, total, &progress).await?;
+    let dest = build_song_path(&config, &album_path, &song)?;
 
-    let lyrics_text = download_lyrics(api, config, path, song).await?;
+    let downloaded = download_audio_file(api, &song, &dest, current, total, &progress).await?;
 
-    let final_dest = convert_if_needed(config, &dest, song)?;
+    let lyrics_text = download_lyrics(api, &config, &album_path, &song).await?;
+
+    let final_dest = convert_if_needed(&config, &dest, &song)?;
 
     if downloaded {
         set_progress_status(&progress, current, &song.name, SongStatus::Tagging);
     }
 
     write_metadata_if_needed(
-        config,
+        &config,
         &final_dest,
-        song,
-        album,
-        cover_data,
+        &song,
+        &album,
+        cover_data.as_deref(),
         lyrics_text,
         downloaded,
     )?;
@@ -519,7 +558,19 @@ fn build_song_path(config: &Config, path: &Path, song: &SongDetail) -> anyhow::R
         .replace("{song_name}", &song_name)
         .replace("{ext}", &ext);
 
-    Ok(path.join(&filename))
+    safe_join_child(path, &filename)
+}
+
+fn safe_join_child(base: &Path, child: &str) -> anyhow::Result<PathBuf> {
+    if child.trim().is_empty() {
+        anyhow::bail!("output path component cannot be empty");
+    }
+
+    let mut components = Path::new(child).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(base.join(child)),
+        _ => anyhow::bail!("output path component must be a single file or folder name: {child}"),
+    }
 }
 
 async fn download_audio_file(
@@ -583,9 +634,21 @@ async fn existing_file_is_complete(
         return Ok(false);
     }
 
-    match api.content_length(&song.source_url).await? {
-        Some(remote_size) => Ok(local_size == remote_size),
-        None => Ok(false),
+    match api.content_length(&song.source_url).await {
+        Ok(Some(remote_size)) => Ok(local_size == remote_size),
+        Ok(None) => Ok(false),
+        Err(e) => {
+            eprintln!(
+                "  {} {}",
+                "CHK".yellow().bold(),
+                format!(
+                    "Could not verify existing file for {}; re-downloading: {}",
+                    song.name, e
+                )
+                .yellow()
+            );
+            Ok(false)
+        }
     }
 }
 
@@ -888,7 +951,7 @@ async fn download_lyrics(
 
     let song_name = sanitize(&song.name);
     let lyric_ext = ext_from_url(lyric_url);
-    let lyric_dest = path.join(format!("{}.{}", song_name, lyric_ext));
+    let lyric_dest = safe_join_child(path, &format!("{}.{}", song_name, lyric_ext))?;
 
     if !lyric_dest.exists() {
         if let Err(e) = api.download_file(lyric_url, &lyric_dest).await {
@@ -999,7 +1062,12 @@ fn sanitize(name: &str) -> String {
         .chars()
         .map(|c| if illegal.contains(&c) { ' ' } else { c })
         .collect();
-    result.trim().trim_matches('.').to_string()
+    let sanitized = result.trim().trim_matches('.');
+    if sanitized.is_empty() {
+        "untitled".to_string()
+    } else {
+        sanitized.to_string()
+    }
 }
 
 fn ext_from_url(url: &str) -> String {
@@ -1082,6 +1150,7 @@ pub async fn download_albums_by_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::SongDetail;
 
     #[test]
     fn test_sanitize() {
@@ -1089,6 +1158,7 @@ mod tests {
         assert_eq!(sanitize("test*file|name"), "test file name");
         assert_eq!(sanitize("  test file  "), "test file");
         assert_eq!(sanitize("normal_file.mp3"), "normal_file.mp3");
+        assert_eq!(sanitize("???"), "untitled");
     }
 
     #[test]
@@ -1100,5 +1170,38 @@ mod tests {
         );
         assert_eq!(ext_from_url("https://example.com/file.flac"), "flac");
         assert_eq!(ext_from_url("https://example.com/path/noext"), "bin");
+    }
+
+    #[test]
+    fn safe_join_child_rejects_path_escape() {
+        let base = Path::new("album");
+
+        assert!(safe_join_child(base, "../song.mp3").is_err());
+        assert!(safe_join_child(base, "nested/song.mp3").is_err());
+        assert_eq!(
+            safe_join_child(base, "song.mp3").unwrap(),
+            base.join("song.mp3")
+        );
+    }
+
+    #[test]
+    fn validate_song_destinations_rejects_duplicates() {
+        let config = Config::default();
+        let songs = vec![(0, song_detail("1", "same")), (1, song_detail("2", "same"))];
+
+        assert!(validate_song_destinations(&config, Path::new("album"), &songs).is_err());
+    }
+
+    fn song_detail(cid: &str, name: &str) -> SongDetail {
+        SongDetail {
+            cid: cid.to_string(),
+            name: name.to_string(),
+            album_cid: "album".to_string(),
+            source_url: "https://example.com/song.mp3".to_string(),
+            lyric_url: None,
+            mv_url: None,
+            mv_cover_url: None,
+            artists: Vec::new(),
+        }
     }
 }
