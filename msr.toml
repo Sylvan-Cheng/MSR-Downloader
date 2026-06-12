@@ -1,0 +1,23 @@
+[api]
+base_url = "https://monster-siren.hypergryph.com/api"
+timeout = 30
+
+[download]
+output_dir = "./MSR_Albums"
+concurrency = 2
+
+[download.include]
+lyrics = true
+covers = true
+album_info = true
+metadata = true
+
+[download.convert]
+enabled = false
+wav_to_flac = false
+delete_original = true
+flac_compression = 5
+
+[naming]
+album_folder = "{album_name}"
+song_file = "{song_name}.{ext}"
