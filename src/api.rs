@@ -1,0 +1,249 @@
+use crate::config::ApiConfig;
+use crate::models::{AlbumBrief, AlbumDetail, ApiResponse, SongDetail};
+use futures_util::StreamExt;
+use reqwest::{
+    header::{ACCEPT_ENCODING, CONTENT_RANGE, RANGE},
+    Client, StatusCode,
+};
+use std::path::Path;
+use tokio::io::AsyncWriteExt;
+
+#[derive(Clone)]
+pub struct ApiClient {
+    client: Client,
+    base_url: String,
+}
+
+impl ApiClient {
+    pub fn new(config: &ApiConfig) -> anyhow::Result<Self> {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(config.timeout))
+            .build()?;
+
+        Ok(Self {
+            client,
+            base_url: config.base_url.clone(),
+        })
+    }
+
+    pub async fn get_albums(&self) -> anyhow::Result<Vec<AlbumBrief>> {
+        let url = format!("{}/albums", self.base_url);
+        let resp: ApiResponse<Vec<AlbumBrief>> = self.client.get(&url).send().await?.json().await?;
+
+        if resp.code != 0 {
+            anyhow::bail!("API error: {}", resp.msg);
+        }
+
+        Ok(resp.data)
+    }
+
+    pub async fn get_album_detail(&self, cid: &str) -> anyhow::Result<AlbumDetail> {
+        let url = format!("{}/album/{}/detail", self.base_url, cid);
+        let resp: ApiResponse<AlbumDetail> = self.client.get(&url).send().await?.json().await?;
+
+        if resp.code != 0 {
+            anyhow::bail!("API error: {}", resp.msg);
+        }
+
+        Ok(resp.data)
+    }
+
+    pub async fn get_song(&self, cid: &str) -> anyhow::Result<SongDetail> {
+        let url = format!("{}/song/{}", self.base_url, cid);
+        let resp: ApiResponse<SongDetail> = self.client.get(&url).send().await?.json().await?;
+
+        if resp.code != 0 {
+            anyhow::bail!("API error: {}", resp.msg);
+        }
+
+        Ok(resp.data)
+    }
+
+    pub async fn download_file(&self, url: &str, dest: &Path) -> anyhow::Result<()> {
+        self.download_file_with_progress(url, dest, |_, _| {}).await
+    }
+
+    pub async fn content_length(&self, url: &str) -> anyhow::Result<Option<u64>> {
+        let resp = self
+            .client
+            .head(url)
+            .header(ACCEPT_ENCODING, "identity")
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.content_length())
+    }
+
+    pub async fn download_file_with_progress<F>(
+        &self,
+        url: &str,
+        dest: &Path,
+        mut on_progress: F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(u64, u64),
+    {
+        let max_retries = 6;
+        let mut attempt = 0;
+        let temp_dest = temp_download_path(dest);
+
+        loop {
+            attempt += 1;
+            let result = self
+                .try_download_with_progress(url, dest, &temp_dest, &mut on_progress)
+                .await;
+
+            match result {
+                Ok(_) => return Ok(()),
+                Err(e) => {
+                    if attempt >= max_retries {
+                        return Err(e);
+                    }
+
+                    let delay_ms = (750 * attempt as u64).min(5_000);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+    }
+
+    async fn try_download_with_progress<F>(
+        &self,
+        url: &str,
+        dest: &Path,
+        temp_dest: &Path,
+        on_progress: &mut F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(u64, u64),
+    {
+        let mut resume_from = tokio::fs::metadata(temp_dest)
+            .await
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+
+        let mut request = self.client.get(url).header(ACCEPT_ENCODING, "identity");
+        if resume_from > 0 {
+            request = request.header(RANGE, format!("bytes={}-", resume_from));
+        }
+
+        let resp = request.send().await?;
+        if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+            let _ = tokio::fs::remove_file(temp_dest).await;
+            anyhow::bail!("server rejected resume range");
+        }
+
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let resp = resp.error_for_status()?;
+
+        if resume_from > 0 && status != StatusCode::PARTIAL_CONTENT {
+            let _ = tokio::fs::remove_file(temp_dest).await;
+            resume_from = 0;
+        }
+
+        let response_len = resp.content_length().unwrap_or(0);
+        let total_size = if status == StatusCode::PARTIAL_CONTENT {
+            parse_content_range_total(&headers).unwrap_or(resume_from + response_len)
+        } else {
+            response_len
+        };
+
+        let mut file = if resume_from > 0 {
+            tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(temp_dest)
+                .await?
+        } else {
+            tokio::fs::File::create(temp_dest).await?
+        };
+        let mut stream = resp.bytes_stream();
+        let mut downloaded = resume_from;
+        let mut last_update = std::time::Instant::now();
+        let mut last_downloaded = downloaded;
+
+        if downloaded > 0 {
+            on_progress(downloaded, total_size);
+        }
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            let chunk_len = chunk.len() as u64;
+            file.write_all(&chunk).await?;
+            downloaded += chunk_len;
+
+            // Update progress every 500ms or every 1MB
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(last_update).as_millis();
+            let bytes_since = downloaded.saturating_sub(last_downloaded);
+
+            if elapsed >= 500 || bytes_since >= 1024 * 1024 {
+                on_progress(downloaded, total_size);
+                last_update = now;
+                last_downloaded = downloaded;
+            }
+        }
+
+        file.flush().await?;
+        drop(file);
+
+        if total_size > 0 && downloaded != total_size {
+            anyhow::bail!(
+                "incomplete download: received {} of {} bytes",
+                downloaded,
+                total_size
+            );
+        }
+
+        tokio::fs::rename(temp_dest, dest).await?;
+        on_progress(downloaded, total_size);
+        Ok(())
+    }
+}
+
+fn parse_content_range_total(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let value = headers.get(CONTENT_RANGE)?.to_str().ok()?;
+    let total = value.rsplit_once('/')?.1;
+    if total == "*" {
+        None
+    } else {
+        total.parse().ok()
+    }
+}
+
+fn temp_download_path(dest: &Path) -> std::path::PathBuf {
+    let file_name = dest
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".to_string());
+    dest.with_file_name(format!("{}.part", file_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn parse_content_range_total_reads_known_total() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_RANGE, HeaderValue::from_static("bytes 10-99/200"));
+
+        assert_eq!(parse_content_range_total(&headers), Some(200));
+    }
+
+    #[test]
+    fn parse_content_range_total_ignores_unknown_total() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_RANGE, HeaderValue::from_static("bytes 10-99/*"));
+
+        assert_eq!(parse_content_range_total(&headers), None);
+    }
+
+    #[test]
+    fn temp_download_path_appends_part_suffix() {
+        let path = Path::new("music/song.wav");
+
+        assert_eq!(temp_download_path(path), Path::new("music/song.wav.part"));
+    }
+}
