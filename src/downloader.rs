@@ -1,4 +1,4 @@
-use crate::api::ApiClient;
+use crate::api::{ApiClient, FileProgress};
 use crate::config::Config;
 use crate::metadata;
 use crate::models::{AlbumDetail, SongDetail};
@@ -7,10 +7,45 @@ use crossterm::{
     terminal::{Clear, ClearType},
 };
 use owo_colors::OwoColorize;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::Semaphore;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SongStatus {
+    Queued,
+    Checking,
+    Getting,
+    Resuming,
+    Tagging,
+    Skipped,
+    Done,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum CliProgressMode {
+    Auto,
+    Plain,
+    Summary,
+}
+
+impl SongStatus {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Queued => "QUE",
+            Self::Checking => "CHK",
+            Self::Getting => "GET",
+            Self::Resuming => "RES",
+            Self::Tagging => "TAG",
+            Self::Skipped => "SKP",
+            Self::Done => "OK ",
+            Self::Failed => "ERR",
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct SongProgress {
@@ -18,9 +53,24 @@ pub struct SongProgress {
     pub name: String,
     pub bytes_downloaded: u64,
     pub total_bytes: u64,
+    pub status: SongStatus,
+    pub resumed: bool,
+    pub resume_from: u64,
+    pub attempt: u32,
+    pub speed_bps: f64,
+    pub last_update: Option<Instant>,
     pub done: bool,
     pub skipped: bool,
     pub failed: bool,
+}
+
+impl SongProgress {
+    fn active_for_plain_output(&self) -> bool {
+        matches!(
+            self.status,
+            SongStatus::Checking | SongStatus::Getting | SongStatus::Resuming | SongStatus::Tagging
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -36,6 +86,7 @@ pub async fn download_album(
     api: &ApiClient,
     album: &AlbumDetail,
     config: &Config,
+    progress_mode: CliProgressMode,
 ) -> anyhow::Result<()> {
     let progress = Arc::new(Mutex::new(DownloadProgress::new(
         &album.name,
@@ -49,7 +100,7 @@ pub async fn download_album(
         async move { download_album_with_progress(&api, &album, &config, Some(progress_clone)).await }
     });
 
-    render_cli_progress(&progress, &download).await?;
+    render_cli_progress(&progress, &download, progress_mode).await?;
     download.await??;
     Ok(())
 }
@@ -62,6 +113,55 @@ impl DownloadProgress {
             completed_songs: 0,
             tasks: Vec::new(),
             errors: Vec::new(),
+        }
+    }
+
+    pub fn failed_count(&self) -> usize {
+        self.tasks.iter().filter(|task| task.failed).count()
+    }
+
+    pub fn skipped_count(&self) -> usize {
+        self.tasks.iter().filter(|task| task.skipped).count()
+    }
+
+    pub fn ok_count(&self) -> usize {
+        self.tasks
+            .iter()
+            .filter(|task| task.done && !task.failed && !task.skipped)
+            .count()
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.tasks
+            .iter()
+            .filter(|task| {
+                matches!(
+                    task.status,
+                    SongStatus::Checking
+                        | SongStatus::Getting
+                        | SongStatus::Resuming
+                        | SongStatus::Tagging
+                )
+            })
+            .count()
+    }
+
+    pub fn total_speed_bps(&self) -> f64 {
+        self.tasks.iter().map(|task| task.speed_bps).sum()
+    }
+
+    pub fn eta_seconds(&self) -> Option<u64> {
+        let remaining: u64 = self
+            .tasks
+            .iter()
+            .filter(|task| task.total_bytes > task.bytes_downloaded)
+            .map(|task| task.total_bytes - task.bytes_downloaded)
+            .sum();
+        let speed = self.total_speed_bps();
+        if remaining > 0 && speed > 0.0 {
+            Some((remaining as f64 / speed).ceil() as u64)
+        } else {
+            None
         }
     }
 }
@@ -93,7 +193,7 @@ pub async fn download_album_with_progress(
     for (idx, song_brief) in album.songs.iter().enumerate() {
         let song_detail = api.get_song(&song_brief.cid).await?;
 
-        update_progress(&progress, idx + 1, &song_detail.name, 0, 0);
+        set_progress_status(&progress, idx + 1, &song_detail.name, SongStatus::Queued);
 
         let api_clone = api.clone();
         let album_path_clone = album_path.clone();
@@ -166,8 +266,73 @@ fn update_progress(
     progress: &Option<Arc<Mutex<DownloadProgress>>>,
     current_song: usize,
     song_name: &str,
-    bytes_downloaded: u64,
-    total_bytes: u64,
+    file_progress: FileProgress,
+) {
+    if let Some(ref p) = progress {
+        if let Ok(mut prog) = p.lock() {
+            let now = Instant::now();
+            if let Some(task) = prog
+                .tasks
+                .iter_mut()
+                .find(|task| task.index == current_song)
+            {
+                let previous_bytes = task.bytes_downloaded;
+                let previous_update = task.last_update;
+                task.name = song_name.to_string();
+                task.bytes_downloaded = file_progress.downloaded;
+                task.total_bytes = file_progress.total;
+                task.resumed = file_progress.resumed;
+                task.resume_from = file_progress.resume_from;
+                task.attempt = file_progress.attempt;
+                task.status = if file_progress.resumed {
+                    SongStatus::Resuming
+                } else {
+                    SongStatus::Getting
+                };
+                if let Some(previous_update) = previous_update {
+                    let elapsed = now.duration_since(previous_update).as_secs_f64();
+                    let bytes_since = file_progress.downloaded.saturating_sub(previous_bytes);
+                    if elapsed > 0.0 && bytes_since > 0 {
+                        let instant_speed = bytes_since as f64 / elapsed;
+                        task.speed_bps = if task.speed_bps > 0.0 {
+                            task.speed_bps * 0.7 + instant_speed * 0.3
+                        } else {
+                            instant_speed
+                        };
+                    }
+                }
+                task.last_update = Some(now);
+                return;
+            }
+
+            prog.tasks.push(SongProgress {
+                index: current_song,
+                name: song_name.to_string(),
+                bytes_downloaded: file_progress.downloaded,
+                total_bytes: file_progress.total,
+                status: if file_progress.resumed {
+                    SongStatus::Resuming
+                } else {
+                    SongStatus::Getting
+                },
+                resumed: file_progress.resumed,
+                resume_from: file_progress.resume_from,
+                attempt: file_progress.attempt,
+                speed_bps: 0.0,
+                last_update: Some(now),
+                done: false,
+                skipped: false,
+                failed: false,
+            });
+        }
+    }
+}
+
+fn set_progress_status(
+    progress: &Option<Arc<Mutex<DownloadProgress>>>,
+    current_song: usize,
+    song_name: &str,
+    status: SongStatus,
 ) {
     if let Some(ref p) = progress {
         if let Ok(mut prog) = p.lock() {
@@ -177,16 +342,22 @@ fn update_progress(
                 .find(|task| task.index == current_song)
             {
                 task.name = song_name.to_string();
-                task.bytes_downloaded = bytes_downloaded;
-                task.total_bytes = total_bytes;
+                task.status = status;
+                task.last_update = Some(Instant::now());
                 return;
             }
 
             prog.tasks.push(SongProgress {
                 index: current_song,
                 name: song_name.to_string(),
-                bytes_downloaded,
-                total_bytes,
+                bytes_downloaded: 0,
+                total_bytes: 0,
+                status,
+                resumed: false,
+                resume_from: 0,
+                attempt: 0,
+                speed_bps: 0.0,
+                last_update: Some(Instant::now()),
                 done: false,
                 skipped: false,
                 failed: false,
@@ -213,6 +384,15 @@ fn finish_progress(
                 task.done = true;
                 task.skipped = skipped;
                 task.failed = failed;
+                task.status = if failed {
+                    SongStatus::Failed
+                } else if skipped {
+                    SongStatus::Skipped
+                } else {
+                    SongStatus::Done
+                };
+                task.speed_bps = 0.0;
+                task.last_update = Some(Instant::now());
             }
             if counted {
                 prog.completed_songs += 1;
@@ -308,6 +488,10 @@ async fn download_song_with_progress(
 
     let final_dest = convert_if_needed(config, &dest, song)?;
 
+    if downloaded {
+        set_progress_status(&progress, current, &song.name, SongStatus::Tagging);
+    }
+
     write_metadata_if_needed(
         config,
         &final_dest,
@@ -317,6 +501,10 @@ async fn download_song_with_progress(
         lyrics_text,
         downloaded,
     )?;
+
+    if downloaded {
+        finish_progress(&progress, current, false, false);
+    }
 
     Ok(())
 }
@@ -342,10 +530,23 @@ async fn download_audio_file(
     total: usize,
     progress: &Option<Arc<Mutex<DownloadProgress>>>,
 ) -> anyhow::Result<bool> {
+    set_progress_status(progress, current, &song.name, SongStatus::Checking);
+
     if dest.exists() {
         if existing_file_is_complete(api, song, dest).await? {
             let size = dest.metadata().map(|metadata| metadata.len()).unwrap_or(1);
-            update_progress(progress, current, &song.name, size, size);
+            update_progress(
+                progress,
+                current,
+                &song.name,
+                FileProgress {
+                    downloaded: size,
+                    total: size,
+                    resumed: false,
+                    resume_from: 0,
+                    attempt: 0,
+                },
+            );
             finish_progress(progress, current, true, false);
             return Ok(false);
         }
@@ -354,19 +555,16 @@ async fn download_audio_file(
     }
 
     let song_name = song.name.clone();
-    update_progress(progress, current, &song_name, 0, 0);
+    set_progress_status(progress, current, &song_name, SongStatus::Getting);
 
     let result = api
-        .download_file_with_progress(&song.source_url, dest, |bytes, total_bytes| {
-            update_progress(progress, current, &song_name, bytes, total_bytes);
+        .download_file_with_progress(&song.source_url, dest, |file_progress| {
+            update_progress(progress, current, &song_name, file_progress);
         })
         .await;
 
     match result {
-        Ok(_) => {
-            finish_progress(progress, current, false, false);
-            Ok(true)
-        }
+        Ok(_) => Ok(true),
         Err(e) => {
             let _ = total;
             finish_progress(progress, current, false, true);
@@ -394,7 +592,16 @@ async fn existing_file_is_complete(
 async fn render_cli_progress(
     progress: &Arc<Mutex<DownloadProgress>>,
     handle: &tokio::task::JoinHandle<anyhow::Result<()>>,
+    progress_mode: CliProgressMode,
 ) -> anyhow::Result<()> {
+    if matches!(progress_mode, CliProgressMode::Summary) {
+        return render_summary_only_cli_progress(progress, handle).await;
+    }
+
+    if matches!(progress_mode, CliProgressMode::Plain) || !io::stderr().is_terminal() {
+        return render_plain_cli_progress(progress, handle).await;
+    }
+
     let mut rendered_lines = 0usize;
 
     loop {
@@ -412,8 +619,56 @@ async fn render_cli_progress(
 
     if let Ok(snapshot) = progress.lock().map(|progress| progress.clone()) {
         draw_cli_progress(&snapshot, rendered_lines)?;
+        print_cli_summary(&snapshot);
     }
     eprintln!();
+    Ok(())
+}
+
+async fn render_summary_only_cli_progress(
+    progress: &Arc<Mutex<DownloadProgress>>,
+    handle: &tokio::task::JoinHandle<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    while !handle.is_finished() {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    if let Ok(snapshot) = progress.lock().map(|progress| progress.clone()) {
+        print_cli_summary(&snapshot);
+    }
+    Ok(())
+}
+
+async fn render_plain_cli_progress(
+    progress: &Arc<Mutex<DownloadProgress>>,
+    handle: &tokio::task::JoinHandle<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    let mut last_completed = usize::MAX;
+    let mut last_tick = Instant::now();
+
+    loop {
+        let snapshot = progress.lock().ok().map(|progress| progress.clone());
+        if let Some(snapshot) = snapshot {
+            let should_print = snapshot.completed_songs != last_completed
+                || last_tick.elapsed() >= std::time::Duration::from_secs(2)
+                || handle.is_finished();
+            if should_print {
+                print_plain_progress(&snapshot);
+                last_completed = snapshot.completed_songs;
+                last_tick = Instant::now();
+            }
+        }
+
+        if handle.is_finished() {
+            break;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    if let Ok(snapshot) = progress.lock().map(|progress| progress.clone()) {
+        print_cli_summary(&snapshot);
+    }
     Ok(())
 }
 
@@ -434,7 +689,7 @@ fn draw_cli_progress(progress: &DownloadProgress, previous_lines: usize) -> anyh
     };
     let mut lines = Vec::new();
     lines.push(format!(
-        "{} {}  {}",
+        "{} {}  {}  {} ACTIVE  {}/s  ETA {}",
         "MSR//".cyan().bold(),
         progress.album_name.white().bold(),
         progress_line(
@@ -442,7 +697,13 @@ fn draw_cli_progress(progress: &DownloadProgress, previous_lines: usize) -> anyh
             progress.completed_songs as u64,
             progress.total_songs as u64,
             "TRACKS"
-        )
+        ),
+        progress.active_count(),
+        format_bytes(progress.total_speed_bps() as u64),
+        progress
+            .eta_seconds()
+            .map(format_duration)
+            .unwrap_or_else(|| "--:--".to_string())
     ));
 
     let mut tasks = progress.tasks.clone();
@@ -453,21 +714,14 @@ fn draw_cli_progress(progress: &DownloadProgress, previous_lines: usize) -> anyh
         } else {
             0.0
         };
-        let status = if task.failed {
-            "ERR".red().bold().to_string()
-        } else if task.skipped {
-            "SKP".dimmed().bold().to_string()
-        } else if task.done {
-            "OK ".cyan().bold().to_string()
-        } else {
-            "GET".white().bold().to_string()
-        };
+        let status = colored_status(task.status);
         lines.push(format!(
-            "  {} {:>2}/{:<2}  {}  {}",
+            "  {} {:>2}/{:<2}  {}  {:>8}/s  {}",
             status,
             task.index,
             progress.total_songs,
             progress_line(ratio, task.bytes_downloaded, task.total_bytes, "MB"),
+            format_bytes(task.speed_bps as u64),
             task.name
         ));
     }
@@ -481,6 +735,76 @@ fn draw_cli_progress(progress: &DownloadProgress, previous_lines: usize) -> anyh
     }
     stderr.flush()?;
     Ok(lines.len())
+}
+
+fn colored_status(status: SongStatus) -> String {
+    match status {
+        SongStatus::Failed => status.code().red().bold().to_string(),
+        SongStatus::Skipped => status.code().dimmed().bold().to_string(),
+        SongStatus::Done | SongStatus::Resuming => status.code().cyan().bold().to_string(),
+        SongStatus::Checking | SongStatus::Tagging => status.code().yellow().bold().to_string(),
+        SongStatus::Queued => status.code().dimmed().to_string(),
+        SongStatus::Getting => status.code().white().bold().to_string(),
+    }
+}
+
+fn print_plain_progress(progress: &DownloadProgress) {
+    eprintln!(
+        "MSR// {} TRACKS {}/{} ACTIVE {} SPEED {}/s ETA {}",
+        progress.album_name,
+        progress.completed_songs,
+        progress.total_songs,
+        progress.active_count(),
+        format_bytes(progress.total_speed_bps() as u64),
+        progress
+            .eta_seconds()
+            .map(format_duration)
+            .unwrap_or_else(|| "--:--".to_string())
+    );
+
+    let mut tasks = progress.tasks.clone();
+    tasks.sort_by_key(|task| task.index);
+    let visible_tasks: Vec<_> = tasks
+        .iter()
+        .filter(|task| task.done || task.active_for_plain_output())
+        .collect();
+    let start = visible_tasks.len().saturating_sub(6);
+    for task in &visible_tasks[start..] {
+        let percent = (progress_ratio(task.bytes_downloaded, task.total_bytes) * 100.0).round();
+        eprintln!(
+            "{} {:>2}/{:<2} {:>3}% {}/{} {}/s {}",
+            task.status.code(),
+            task.index,
+            progress.total_songs,
+            percent as u64,
+            format_bytes(task.bytes_downloaded),
+            format_bytes(task.total_bytes),
+            format_bytes(task.speed_bps as u64),
+            task.name
+        );
+    }
+}
+
+fn print_cli_summary(progress: &DownloadProgress) {
+    let status = if progress.failed_count() > 0 {
+        "MSR// TRANSFER INCOMPLETE".red().bold().to_string()
+    } else {
+        "MSR// TRANSFER SUMMARY".cyan().bold().to_string()
+    };
+    eprintln!("\n{}", status);
+    eprintln!(
+        "  TRACKS  {} ok / {} skipped / {} failed",
+        progress.ok_count(),
+        progress.skipped_count(),
+        progress.failed_count()
+    );
+    if progress.errors.is_empty() {
+        return;
+    }
+    eprintln!("  FAILED");
+    for error in progress.errors.iter().rev().take(5).rev() {
+        eprintln!("  ERR  {}", error);
+    }
 }
 
 fn progress_line(ratio: f64, current: u64, total: u64, unit: &str) -> String {
@@ -534,6 +858,17 @@ pub fn progress_ratio(bytes_downloaded: u64, total_bytes: u64) -> f64 {
 pub fn format_bytes(bytes: u64) -> String {
     let mb = bytes as f64 / 1024.0 / 1024.0;
     format!("{:.1} MB", mb)
+}
+
+pub fn format_duration(seconds: u64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+    } else {
+        format!("{:02}:{:02}", minutes, seconds)
+    }
 }
 
 async fn download_lyrics(
@@ -677,7 +1012,11 @@ fn ext_from_url(url: &str) -> String {
     }
 }
 
-pub async fn download_all(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
+pub async fn download_all(
+    api: &ApiClient,
+    config: &Config,
+    progress_mode: CliProgressMode,
+) -> anyhow::Result<()> {
     let albums = api.get_albums().await?;
     println!("{} {} ALBUMS", "MSR//".cyan().bold(), albums.len());
 
@@ -690,7 +1029,7 @@ pub async fn download_all(api: &ApiClient, config: &Config) -> anyhow::Result<()
             album_brief.name.white().bold()
         );
         let album_detail = api.get_album_detail(&album_brief.cid).await?;
-        download_album(api, &album_detail, config).await?;
+        download_album(api, &album_detail, config, progress_mode).await?;
     }
 
     Ok(())
@@ -700,6 +1039,7 @@ pub async fn download_albums_by_name(
     api: &ApiClient,
     config: &Config,
     names: &[String],
+    progress_mode: CliProgressMode,
 ) -> anyhow::Result<()> {
     let albums = api.get_albums().await?;
     let matched: Vec<_> = albums
@@ -733,7 +1073,7 @@ pub async fn download_albums_by_name(
             album_brief.name.white().bold()
         );
         let album_detail = api.get_album_detail(&album_brief.cid).await?;
-        download_album(api, &album_detail, config).await?;
+        download_album(api, &album_detail, config, progress_mode).await?;
     }
 
     Ok(())

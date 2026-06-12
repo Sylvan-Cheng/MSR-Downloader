@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -156,8 +157,10 @@ impl Config {
         if !config_path.exists() {
             return Ok(Self::default());
         }
-        let content = std::fs::read_to_string(config_path)?;
-        let config: Config = toml::from_str(&content)?;
+        let content = std::fs::read_to_string(config_path)
+            .with_context(|| format!("failed to read config file {}", config_path.display()))?;
+        let config: Config = toml::from_str(&content)
+            .with_context(|| format!("failed to parse config file {}", config_path.display()))?;
         Ok(config)
     }
 }
