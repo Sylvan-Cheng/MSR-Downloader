@@ -1,5 +1,6 @@
 use crate::config::ApiConfig;
 use crate::models::{AlbumBrief, AlbumDetail, ApiResponse, SongDetail};
+use anyhow::Context;
 use futures_util::StreamExt;
 use reqwest::{
     header::{ACCEPT_ENCODING, CONTENT_RANGE, RANGE},
@@ -37,7 +38,17 @@ impl ApiClient {
 
     pub async fn get_albums(&self) -> anyhow::Result<Vec<AlbumBrief>> {
         let url = format!("{}/albums", self.base_url);
-        let resp: ApiResponse<Vec<AlbumBrief>> = self.client.get(&url).send().await?.json().await?;
+        let resp: ApiResponse<Vec<AlbumBrief>> = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("failed to request albums from {url}"))?
+            .error_for_status()
+            .with_context(|| format!("album request failed: {url}"))?
+            .json()
+            .await
+            .with_context(|| format!("failed to parse album response from {url}"))?;
 
         if resp.code != 0 {
             anyhow::bail!("API error: {}", resp.msg);
@@ -48,7 +59,17 @@ impl ApiClient {
 
     pub async fn get_album_detail(&self, cid: &str) -> anyhow::Result<AlbumDetail> {
         let url = format!("{}/album/{}/detail", self.base_url, cid);
-        let resp: ApiResponse<AlbumDetail> = self.client.get(&url).send().await?.json().await?;
+        let resp: ApiResponse<AlbumDetail> = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("failed to request album detail from {url}"))?
+            .error_for_status()
+            .with_context(|| format!("album detail request failed: {url}"))?
+            .json()
+            .await
+            .with_context(|| format!("failed to parse album detail response from {url}"))?;
 
         if resp.code != 0 {
             anyhow::bail!("API error: {}", resp.msg);
@@ -59,7 +80,17 @@ impl ApiClient {
 
     pub async fn get_song(&self, cid: &str) -> anyhow::Result<SongDetail> {
         let url = format!("{}/song/{}", self.base_url, cid);
-        let resp: ApiResponse<SongDetail> = self.client.get(&url).send().await?.json().await?;
+        let resp: ApiResponse<SongDetail> = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("failed to request song from {url}"))?
+            .error_for_status()
+            .with_context(|| format!("song request failed: {url}"))?
+            .json()
+            .await
+            .with_context(|| format!("failed to parse song response from {url}"))?;
 
         if resp.code != 0 {
             anyhow::bail!("API error: {}", resp.msg);

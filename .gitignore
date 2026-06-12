@@ -28,3 +28,6 @@ Thumbs.db
 
 # Download output
 MSR_Albums/
+
+# Playwright MCP runtime output
+.playwright-mcp/

@@ -7,6 +7,7 @@ pub struct ApiResponse<T> {
     pub data: T,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct AlbumBrief {
     pub cid: String,
@@ -25,6 +26,7 @@ pub struct SongBrief {
     pub artistes: Vec<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct AlbumDetail {
     pub cid: String,
@@ -41,6 +43,7 @@ pub struct AlbumDetail {
     pub songs: Vec<SongBrief>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct SongDetail {
     pub cid: String,
