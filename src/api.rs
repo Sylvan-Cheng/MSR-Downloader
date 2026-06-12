@@ -8,6 +8,15 @@ use reqwest::{
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FileProgress {
+    pub downloaded: u64,
+    pub total: u64,
+    pub resumed: bool,
+    pub resume_from: u64,
+    pub attempt: u32,
+}
+
 #[derive(Clone)]
 pub struct ApiClient {
     client: Client,
@@ -60,7 +69,7 @@ impl ApiClient {
     }
 
     pub async fn download_file(&self, url: &str, dest: &Path) -> anyhow::Result<()> {
-        self.download_file_with_progress(url, dest, |_, _| {}).await
+        self.download_file_with_progress(url, dest, |_| {}).await
     }
 
     pub async fn content_length(&self, url: &str) -> anyhow::Result<Option<u64>> {
@@ -81,7 +90,7 @@ impl ApiClient {
         mut on_progress: F,
     ) -> anyhow::Result<()>
     where
-        F: FnMut(u64, u64),
+        F: FnMut(FileProgress),
     {
         let max_retries = 6;
         let mut attempt = 0;
@@ -90,7 +99,7 @@ impl ApiClient {
         loop {
             attempt += 1;
             let result = self
-                .try_download_with_progress(url, dest, &temp_dest, &mut on_progress)
+                .try_download_with_progress(url, dest, &temp_dest, attempt, &mut on_progress)
                 .await;
 
             match result {
@@ -112,16 +121,18 @@ impl ApiClient {
         url: &str,
         dest: &Path,
         temp_dest: &Path,
+        attempt: u32,
         on_progress: &mut F,
     ) -> anyhow::Result<()>
     where
-        F: FnMut(u64, u64),
+        F: FnMut(FileProgress),
     {
         let mut resume_from = tokio::fs::metadata(temp_dest)
             .await
             .map(|metadata| metadata.len())
             .unwrap_or(0);
 
+        let requested_resume_from = resume_from;
         let mut request = self.client.get(url).header(ACCEPT_ENCODING, "identity");
         if resume_from > 0 {
             request = request.header(RANGE, format!("bytes={}-", resume_from));
@@ -163,7 +174,13 @@ impl ApiClient {
         let mut last_downloaded = downloaded;
 
         if downloaded > 0 {
-            on_progress(downloaded, total_size);
+            on_progress(FileProgress {
+                downloaded,
+                total: total_size,
+                resumed: true,
+                resume_from: downloaded,
+                attempt,
+            });
         }
 
         while let Some(chunk) = stream.next().await {
@@ -178,7 +195,13 @@ impl ApiClient {
             let bytes_since = downloaded.saturating_sub(last_downloaded);
 
             if elapsed >= 500 || bytes_since >= 1024 * 1024 {
-                on_progress(downloaded, total_size);
+                on_progress(FileProgress {
+                    downloaded,
+                    total: total_size,
+                    resumed: resume_from > 0,
+                    resume_from: requested_resume_from,
+                    attempt,
+                });
                 last_update = now;
                 last_downloaded = downloaded;
             }
@@ -196,7 +219,13 @@ impl ApiClient {
         }
 
         tokio::fs::rename(temp_dest, dest).await?;
-        on_progress(downloaded, total_size);
+        on_progress(FileProgress {
+            downloaded,
+            total: total_size,
+            resumed: resume_from > 0,
+            resume_from: requested_resume_from,
+            attempt,
+        });
         Ok(())
     }
 }
