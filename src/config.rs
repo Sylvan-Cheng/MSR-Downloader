@@ -161,8 +161,37 @@ impl Config {
             .with_context(|| format!("failed to read config file {}", config_path.display()))?;
         let config: Config = toml::from_str(&content)
             .with_context(|| format!("failed to parse config file {}", config_path.display()))?;
+        config.validate()?;
         Ok(config)
     }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.api.timeout == 0 {
+            anyhow::bail!("api.timeout must be greater than 0");
+        }
+        if self.download.concurrency == 0 {
+            anyhow::bail!("download.concurrency must be greater than 0");
+        }
+        if self.download.concurrency > 16 {
+            anyhow::bail!("download.concurrency must not exceed 16");
+        }
+        if self.download.convert.flac_compression > 8 {
+            anyhow::bail!("download.convert.flac_compression must be between 0 and 8");
+        }
+        validate_template_component(&self.naming.album_folder, "naming.album_folder")?;
+        validate_template_component(&self.naming.song_file, "naming.song_file")?;
+        Ok(())
+    }
+}
+
+fn validate_template_component(value: &str, field: &str) -> anyhow::Result<()> {
+    if value.trim().is_empty() {
+        anyhow::bail!("{field} cannot be empty");
+    }
+    if value.contains('/') || value.contains('\\') || value.trim() == ".." {
+        anyhow::bail!("{field} must not contain path separators or parent directory segments");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -223,5 +252,21 @@ wav_to_flac = true
         assert!(config.download.include.metadata);
         assert!(config.download.convert.enabled);
         assert!(config.download.convert.wav_to_flac);
+    }
+
+    #[test]
+    fn validate_rejects_unsafe_templates() {
+        let mut config = Config::default();
+        config.naming.song_file = "../{song_name}.{ext}".to_string();
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_compression() {
+        let mut config = Config::default();
+        config.download.convert.flac_compression = 9;
+
+        assert!(config.validate().is_err());
     }
 }

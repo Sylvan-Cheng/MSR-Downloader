@@ -8,6 +8,7 @@ use api::ApiClient;
 use clap::Parser;
 use config::Config;
 use crossterm::{
+    cursor,
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
         MouseEventKind,
@@ -22,7 +23,7 @@ use downloader::{DownloadProgress, SongStatus};
 use owo_colors::OwoColorize;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph, Wrap},
@@ -32,6 +33,24 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
+
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableMouseCapture,
+            cursor::Show
+        );
+    }
+}
+
+fn is_key(code: KeyCode, expected: char) -> bool {
+    matches!(code, KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&expected))
+}
 
 const COLOR_PRIMARY: Color = Color::Rgb(0, 216, 198);
 const COLOR_SECONDARY: Color = Color::Rgb(214, 218, 216);
@@ -112,10 +131,27 @@ fn clean_partial_files(dir: &std::path::Path) -> anyhow::Result<usize> {
     Ok(removed)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppScreen {
     Select,
     Downloading,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AlbumMouseAction {
+    Focus(usize),
+    Toggle(usize),
+}
+
+struct DownloadScreen<'a> {
+    albums: &'a [models::AlbumBrief],
+    selected_albums: &'a [bool],
+    current_album_idx: usize,
+    current: usize,
+    total: usize,
+    progress: &'a DownloadProgress,
+    downloaded: &'a [String],
+    done: bool,
 }
 
 fn filtered_album_indices(albums: &[models::AlbumBrief], query: &str) -> Vec<usize> {
@@ -263,15 +299,7 @@ fn draw_select_screen(
     search_query: &str,
     search_active: bool,
 ) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(3),
-            Constraint::Length(3),
-        ])
-        .split(f.area());
+    let chunks = app_chunks(f.area());
 
     draw_app_header(
         f,
@@ -281,10 +309,7 @@ fn draw_select_screen(
         COLOR_PRIMARY,
     );
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
-        .split(chunks[1]);
+    let body = select_body_chunks(chunks[1]);
 
     let visible_indices = filtered_album_indices(albums, search_query);
     let visible_position = selected_visible_position(&visible_indices, selected);
@@ -388,39 +413,27 @@ fn draw_select_screen(
             Span::styled("Enter", Style::default().fg(COLOR_INFO)),
             Span::raw(" DOWNLOAD  "),
             Span::styled("Tab", Style::default().fg(COLOR_INFO)),
-            Span::raw(if is_downloading {
-                " PROGRESS  "
-            } else {
-                " PROGRESS  "
-            }),
+            Span::raw(" PROGRESS  "),
             Span::styled("Q", Style::default().fg(COLOR_INFO)),
             Span::raw(" QUIT"),
         ]),
     );
 }
 
-fn draw_download_screen(
-    f: &mut ratatui::Frame,
-    albums: &[models::AlbumBrief],
-    selected_albums: &[bool],
-    current_album_idx: usize,
-    current: usize,
-    total: usize,
-    progress: &DownloadProgress,
-    downloaded: &[String],
-    done: bool,
-) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(8),
-            Constraint::Length(3),
-            Constraint::Length(3),
-        ])
-        .split(f.area());
+fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
+    let DownloadScreen {
+        albums,
+        selected_albums,
+        current_album_idx,
+        current,
+        total,
+        progress,
+        downloaded,
+        done,
+    } = state;
+    let chunks = app_chunks(f.area());
 
-    let is_idle = !done && total == 0 && progress.total_songs == 0;
+    let is_idle = is_transfer_idle(done, total, progress.total_songs);
     let title_color = if is_idle {
         COLOR_MUTED
     } else if done && progress.failed_count() > 0 {
@@ -468,7 +481,7 @@ fn draw_download_screen(
     let album_items: Vec<ListItem> = albums
         .iter()
         .enumerate()
-        .filter(|(idx, _)| selected_albums[*idx] || *idx == current_album_idx)
+        .filter(|(idx, _)| !is_idle && (selected_albums[*idx] || *idx == current_album_idx))
         .map(|(i, a)| {
             let queue_pos = current.saturating_sub(1);
             let album_pos = selected_albums[..i]
@@ -688,6 +701,10 @@ fn draw_download_screen(
     );
 }
 
+fn is_transfer_idle(done: bool, total_albums: usize, total_songs: usize) -> bool {
+    !done && total_albums == 0 && total_songs == 0
+}
+
 fn current_transfer_index(
     download_queue: &[usize],
     albums: &[models::AlbumBrief],
@@ -701,50 +718,104 @@ fn current_transfer_index(
         .map(|(queue_idx, album_idx)| (queue_idx, *album_idx))
 }
 
-fn select_album_at_mouse_row(
-    selected: usize,
+fn app_chunks(area: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ])
+        .split(area)
+}
+
+fn select_body_chunks(area: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
+        .split(area)
+}
+
+fn contains_point(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x
+        && x < rect.x.saturating_add(rect.width)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.height)
+}
+
+fn screen_from_header_click(header: Rect, x: u16, y: u16) -> Option<AppScreen> {
+    if !contains_point(header, x, y) || y != header.y + 1 {
+        return None;
+    }
+
+    let content_x = header.x + 1;
+    let albums_start = content_x;
+    let albums_end = albums_start + "ALBUMS [1]".len() as u16;
+    let transfer_start = albums_end + 4;
+    let transfer_end = transfer_start + "TRANSFER [2]".len() as u16;
+
+    if x >= albums_start && x < albums_end {
+        Some(AppScreen::Select)
+    } else if x >= transfer_start && x < transfer_end {
+        Some(AppScreen::Downloading)
+    } else {
+        None
+    }
+}
+
+fn album_mouse_action(
+    selected_visible: usize,
     album_count: usize,
+    list_area: Rect,
     mouse_x: u16,
     mouse_y: u16,
-) -> Option<usize> {
-    let (width, height) = terminal_size().ok()?;
-    if album_count == 0 || width < 4 || height < 10 {
+) -> Option<AlbumMouseAction> {
+    if album_count == 0 || !contains_point(list_area, mouse_x, mouse_y) {
         return None;
     }
 
-    let body_top = 3u16;
-    let body_bottom = height.saturating_sub(6);
-    let browse_left = 2u16;
-    let browse_right = ((width as f32) * 0.64).floor() as u16;
-
-    if mouse_x < browse_left
-        || mouse_x >= browse_right
-        || mouse_y <= body_top
-        || mouse_y >= body_bottom
-    {
+    let content_left = list_area.x.saturating_add(2);
+    let content_top = list_area.y.saturating_add(1);
+    let content_bottom = list_area
+        .y
+        .saturating_add(list_area.height)
+        .saturating_sub(1);
+    if mouse_y < content_top || mouse_y >= content_bottom || mouse_x < content_left {
         return None;
     }
 
-    let visible_rows = body_bottom.saturating_sub(body_top + 1) as usize;
+    let visible_rows = content_bottom.saturating_sub(content_top) as usize;
     if visible_rows == 0 {
         return None;
     }
 
-    let start = selected.saturating_add(1).saturating_sub(visible_rows);
-    let row = mouse_y.saturating_sub(body_top + 1) as usize;
+    let start = selected_visible
+        .saturating_add(1)
+        .saturating_sub(visible_rows);
+    let row = mouse_y.saturating_sub(content_top) as usize;
     let index = start + row;
+    if index >= album_count {
+        return None;
+    }
 
-    (index < album_count).then_some(index)
+    if mouse_x <= content_left + 1 {
+        Some(AlbumMouseAction::Toggle(index))
+    } else {
+        Some(AlbumMouseAction::Focus(index))
+    }
 }
 
 async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
+    let albums = api.get_albums().await?;
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let _terminal_guard = TerminalGuard;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let albums = api.get_albums().await?;
     let mut screen = AppScreen::Select;
     let mut selected = 0usize;
     let mut selected_albums: Vec<bool> = vec![false; albums.len()];
@@ -819,7 +890,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                             KeyCode::Char(ch) if search_active => {
                                 search_query.push(ch);
                             }
-                            KeyCode::Char('q') => break,
+                            code if is_key(code, 'q') => break,
                             KeyCode::Char('1') => screen = AppScreen::Select,
                             KeyCode::Char('2') => screen = AppScreen::Downloading,
                             KeyCode::Tab => screen = AppScreen::Downloading,
@@ -830,21 +901,19 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                 move_selection(&mut selected, &visible_indices, 1);
                             }
                             KeyCode::Char(' ') => {
-                                if !visible_indices.is_empty() {
+                                if !visible_indices.is_empty() && download_handle.is_none() {
                                     selected_albums[selected] = !selected_albums[selected];
                                 }
                             }
-                            KeyCode::Char('a') => {
+                            code if is_key(code, 'a') && download_handle.is_none() => {
                                 let all_selected =
                                     visible_indices.iter().all(|&idx| selected_albums[idx]);
                                 for &idx in &visible_indices {
                                     selected_albums[idx] = !all_selected;
                                 }
                             }
-                            KeyCode::Char('c') if download_handle.is_none() => {
-                                for selected in &mut selected_albums {
-                                    *selected = false;
-                                }
+                            code if is_key(code, 'c') && download_handle.is_none() => {
+                                selected_albums.fill(false);
                             }
                             KeyCode::Enter if download_handle.is_none() => {
                                 download_queue = selected_albums
@@ -899,22 +968,52 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                         },
                         Event::Mouse(mouse) => match mouse.kind {
                             MouseEventKind::ScrollUp => {
-                                move_selection(&mut selected, &visible_indices, -1);
+                                if let Ok((width, height)) = terminal_size() {
+                                    let chunks = app_chunks(Rect::new(0, 0, width, height));
+                                    let body = select_body_chunks(chunks[1]);
+                                    if contains_point(body[0], mouse.column, mouse.row) {
+                                        move_selection(&mut selected, &visible_indices, -1);
+                                    }
+                                }
                             }
                             MouseEventKind::ScrollDown => {
-                                move_selection(&mut selected, &visible_indices, 1);
+                                if let Ok((width, height)) = terminal_size() {
+                                    let chunks = app_chunks(Rect::new(0, 0, width, height));
+                                    let body = select_body_chunks(chunks[1]);
+                                    if contains_point(body[0], mouse.column, mouse.row) {
+                                        move_selection(&mut selected, &visible_indices, 1);
+                                    }
+                                }
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
-                                if let Some(index) = select_album_at_mouse_row(
-                                    selected_visible_position(&visible_indices, selected),
-                                    visible_indices.len(),
-                                    mouse.column,
-                                    mouse.row,
-                                ) {
-                                    if let Some(&album_index) = visible_indices.get(index) {
-                                        selected = album_index;
-                                        if download_handle.is_none() {
-                                            selected_albums[selected] = !selected_albums[selected];
+                                if let Ok((width, height)) = terminal_size() {
+                                    let chunks = app_chunks(Rect::new(0, 0, width, height));
+                                    if let Some(next_screen) =
+                                        screen_from_header_click(chunks[0], mouse.column, mouse.row)
+                                    {
+                                        screen = next_screen;
+                                    } else {
+                                        let body = select_body_chunks(chunks[1]);
+                                        if let Some(action) = album_mouse_action(
+                                            selected_visible_position(&visible_indices, selected),
+                                            visible_indices.len(),
+                                            body[0],
+                                            mouse.column,
+                                            mouse.row,
+                                        ) {
+                                            let index = match action {
+                                                AlbumMouseAction::Focus(index)
+                                                | AlbumMouseAction::Toggle(index) => index,
+                                            };
+                                            if let Some(&album_index) = visible_indices.get(index) {
+                                                selected = album_index;
+                                                if matches!(action, AlbumMouseAction::Toggle(_))
+                                                    && download_handle.is_none()
+                                                {
+                                                    selected_albums[selected] =
+                                                        !selected_albums[selected];
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -937,14 +1036,16 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                     terminal.draw(|f| {
                         draw_download_screen(
                             f,
-                            &albums,
-                            &selected_albums,
-                            active_album_idx,
-                            download_current + 1,
-                            download_queue.len().max(1),
-                            &prog,
-                            &downloaded_names,
-                            transfer_done,
+                            DownloadScreen {
+                                albums: &albums,
+                                selected_albums: &selected_albums,
+                                current_album_idx: active_album_idx,
+                                current: download_current + 1,
+                                total: download_queue.len(),
+                                progress: &prog,
+                                downloaded: &downloaded_names,
+                                done: transfer_done,
+                            },
                         );
                     })?;
                 }
@@ -952,38 +1053,37 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                 if event::poll(std::time::Duration::from_millis(80))? {
                     match event::read()? {
                         Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                            KeyCode::Char('q') => break,
+                            code if is_key(code, 'q') => break,
                             KeyCode::Char('1') => {
                                 if transfer_done {
-                                    for selected in &mut selected_albums {
-                                        *selected = false;
-                                    }
+                                    selected_albums.fill(false);
                                 }
                                 screen = AppScreen::Select;
                             }
                             KeyCode::Char('2') => screen = AppScreen::Downloading,
                             KeyCode::Tab => {
                                 if transfer_done {
-                                    for selected in &mut selected_albums {
-                                        *selected = false;
-                                    }
+                                    selected_albums.fill(false);
                                 }
                                 screen = AppScreen::Select;
                             }
                             _ => {}
                         },
-                        Event::Mouse(mouse) => match mouse.kind {
-                            MouseEventKind::Down(MouseButton::Left) => {
-                                if mouse.row
-                                    >= terminal_size()
-                                        .map(|(_, h)| h.saturating_sub(3))
-                                        .unwrap_or(0)
-                                {
-                                    screen = AppScreen::Select;
+                        Event::Mouse(mouse) => {
+                            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                                if let Ok((width, height)) = terminal_size() {
+                                    let chunks = app_chunks(Rect::new(0, 0, width, height));
+                                    if let Some(next_screen) =
+                                        screen_from_header_click(chunks[0], mouse.column, mouse.row)
+                                    {
+                                        if next_screen == AppScreen::Select && transfer_done {
+                                            selected_albums.fill(false);
+                                        }
+                                        screen = next_screen;
+                                    }
                                 }
                             }
-                            _ => {}
-                        },
+                        }
                         _ => {}
                     }
                 }
@@ -995,12 +1095,6 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
         handle.abort();
     }
 
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
     terminal.show_cursor()?;
 
     Ok(())
@@ -1018,6 +1112,8 @@ async fn main() -> anyhow::Result<()> {
     if let Some(concurrency) = cli.concurrency {
         config.download.concurrency = concurrency.max(1);
     }
+
+    config.validate()?;
 
     if cli.print_config {
         print_config_summary(&config);
@@ -1112,5 +1208,44 @@ mod tests {
 
         move_selection(&mut selected, &visible, -1);
         assert_eq!(selected, 3);
+    }
+
+    #[test]
+    fn header_click_maps_to_tabs() {
+        let header = Rect::new(0, 0, 100, 3);
+
+        assert_eq!(
+            screen_from_header_click(header, 1, 1),
+            Some(AppScreen::Select)
+        );
+        assert_eq!(
+            screen_from_header_click(header, 16, 1),
+            Some(AppScreen::Downloading)
+        );
+        assert_eq!(screen_from_header_click(header, 40, 1), None);
+        assert_eq!(screen_from_header_click(header, 1, 2), None);
+    }
+
+    #[test]
+    fn album_mouse_action_distinguishes_focus_and_toggle() {
+        let list_area = Rect::new(0, 3, 64, 20);
+
+        assert_eq!(
+            album_mouse_action(0, 10, list_area, 2, 4),
+            Some(AlbumMouseAction::Toggle(0))
+        );
+        assert_eq!(
+            album_mouse_action(0, 10, list_area, 6, 4),
+            Some(AlbumMouseAction::Focus(0))
+        );
+        assert_eq!(album_mouse_action(0, 10, list_area, 70, 4), None);
+    }
+
+    #[test]
+    fn transfer_idle_requires_no_active_or_completed_transfer() {
+        assert!(is_transfer_idle(false, 0, 0));
+        assert!(!is_transfer_idle(false, 1, 0));
+        assert!(!is_transfer_idle(false, 0, 1));
+        assert!(!is_transfer_idle(true, 0, 0));
     }
 }
