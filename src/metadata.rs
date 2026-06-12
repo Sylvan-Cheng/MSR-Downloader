@@ -42,7 +42,7 @@ fn write_id3(
 
     if let Some(data) = cover_data {
         let picture = id3::frame::Picture {
-            mime_type: "image/jpeg".to_string(),
+            mime_type: image_mime_type(data).to_string(),
             picture_type: id3::frame::PictureType::CoverFront,
             description: String::new(),
             data: data.to_vec(),
@@ -60,6 +60,18 @@ fn write_id3(
 
     tag.write_to_path(path, id3::Version::Id3v24)?;
     Ok(())
+}
+
+fn image_mime_type(data: &[u8]) -> &'static str {
+    if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    }
 }
 
 fn write_flac_metadata(
@@ -102,36 +114,22 @@ pub fn convert_wav_to_flac(
     Ok(())
 }
 
-pub fn get_audio_extension(url: &str) -> String {
-    let path = url.split('?').next().unwrap_or(url);
-    let filename = path.rsplit('/').next().unwrap_or(path);
-    if filename.contains('.') {
-        filename.rsplit('.').next().unwrap_or("mp3").to_lowercase()
-    } else {
-        "mp3".to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_get_audio_extension() {
-        assert_eq!(get_audio_extension("https://example.com/file.mp3"), "mp3");
-        assert_eq!(get_audio_extension("https://example.com/file.wav"), "wav");
-        assert_eq!(get_audio_extension("https://example.com/file.flac"), "flac");
-        assert_eq!(
-            get_audio_extension("https://example.com/file.mp3?token=123"),
-            "mp3"
-        );
-        assert_eq!(get_audio_extension("https://example.com/path/noext"), "mp3");
-    }
 
     #[test]
     fn test_write_metadata_unsupported_format() {
         let path = Path::new("test.ogg");
         let result = write_metadata(path, "title", "artist", "album", 1, None, None);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_image_mime_type_detects_common_formats() {
+        assert_eq!(image_mime_type(&[0xFF, 0xD8, 0xFF, 0x00]), "image/jpeg");
+        assert_eq!(image_mime_type(b"\x89PNG\r\n\x1a\nrest"), "image/png");
+        assert_eq!(image_mime_type(b"RIFFxxxxWEBPrest"), "image/webp");
+        assert_eq!(image_mime_type(b"unknown"), "image/jpeg");
     }
 }
