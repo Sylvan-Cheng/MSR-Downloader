@@ -1,5 +1,6 @@
 use crate::api::{ApiClient, FileProgress};
 use crate::config::Config;
+use crate::format;
 use crate::metadata;
 use crate::models::{AlbumDetail, SongDetail};
 use crossterm::{
@@ -813,21 +814,17 @@ fn draw_cli_progress(progress: &DownloadProgress, previous_lines: usize) -> anyh
             "TRACKS"
         ),
         progress.active_count(),
-        format_bytes(progress.total_speed_bps() as u64),
+        format::format_bytes(progress.total_speed_bps() as u64),
         progress
             .eta_seconds()
-            .map(format_duration)
+            .map(format::format_duration)
             .unwrap_or_else(|| "--:--".to_string())
     ));
 
     let mut tasks = progress.tasks.clone();
     tasks.sort_by_key(|task| task.index);
     for task in tasks.iter().rev().take(8).rev() {
-        let ratio = if task.total_bytes > 0 {
-            task.bytes_downloaded as f64 / task.total_bytes as f64
-        } else {
-            0.0
-        };
+        let ratio = format::progress_ratio(task.bytes_downloaded, task.total_bytes);
         let status = colored_status(task.status);
         lines.push(format!(
             "  {} {:>2}/{:<2}  {}  {:>8}/s  {}",
@@ -835,7 +832,7 @@ fn draw_cli_progress(progress: &DownloadProgress, previous_lines: usize) -> anyh
             task.index,
             progress.total_songs,
             progress_line(ratio, task.bytes_downloaded, task.total_bytes, "MB"),
-            format_bytes(task.speed_bps as u64),
+            format::format_bytes(task.speed_bps as u64),
             task.name
         ));
     }
@@ -869,10 +866,10 @@ fn print_plain_progress(progress: &DownloadProgress) {
         progress.completed_songs,
         progress.total_songs,
         progress.active_count(),
-        format_bytes(progress.total_speed_bps() as u64),
+        format::format_bytes(progress.total_speed_bps() as u64),
         progress
             .eta_seconds()
-            .map(format_duration)
+            .map(format::format_duration)
             .unwrap_or_else(|| "--:--".to_string())
     );
 
@@ -884,16 +881,17 @@ fn print_plain_progress(progress: &DownloadProgress) {
         .collect();
     let start = visible_tasks.len().saturating_sub(6);
     for task in &visible_tasks[start..] {
-        let percent = (progress_ratio(task.bytes_downloaded, task.total_bytes) * 100.0).round();
+        let percent =
+            (format::progress_ratio(task.bytes_downloaded, task.total_bytes) * 100.0).round();
         eprintln!(
             "{} {:>2}/{:<2} {:>3}% {}/{} {}/s {}",
             task.status.code(),
             task.index,
             progress.total_songs,
             percent as u64,
-            format_bytes(task.bytes_downloaded),
-            format_bytes(task.total_bytes),
-            format_bytes(task.speed_bps as u64),
+            format::format_bytes(task.bytes_downloaded),
+            format::format_bytes(task.total_bytes),
+            format::format_bytes(task.speed_bps as u64),
             task.name
         );
     }
@@ -929,19 +927,7 @@ fn print_cli_summary(progress: &DownloadProgress) {
 fn progress_line(ratio: f64, current: u64, total: u64, unit: &str) -> String {
     let width = 28usize;
     let ratio = ratio.clamp(0.0, 1.0);
-    let units = (ratio * width as f64).floor() as usize;
-    let filled = if ratio >= 1.0 {
-        width
-    } else {
-        units.min(width.saturating_sub(1))
-    };
-    let head = if ratio > 0.0 && ratio < 1.0 {
-        "╸"
-    } else {
-        ""
-    };
-    let empty = width.saturating_sub(filled + head.chars().count());
-    let bar = format!("{}{}{}", "─".repeat(filled), head, "·".repeat(empty));
+    let bar = format::progress_bar(ratio, width);
     let percent = (ratio * 100.0).round() as u64;
 
     if unit == "MB" {
@@ -963,30 +949,6 @@ fn progress_line(ratio: f64, current: u64, total: u64, unit: &str) -> String {
             total,
             unit
         )
-    }
-}
-
-pub fn progress_ratio(bytes_downloaded: u64, total_bytes: u64) -> f64 {
-    if total_bytes > 0 {
-        bytes_downloaded as f64 / total_bytes as f64
-    } else {
-        0.0
-    }
-}
-
-pub fn format_bytes(bytes: u64) -> String {
-    let mb = bytes as f64 / 1024.0 / 1024.0;
-    format!("{:.1} MB", mb)
-}
-
-pub fn format_duration(seconds: u64) -> String {
-    let hours = seconds / 3600;
-    let minutes = (seconds % 3600) / 60;
-    let seconds = seconds % 60;
-    if hours > 0 {
-        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
-    } else {
-        format!("{:02}:{:02}", minutes, seconds)
     }
 }
 

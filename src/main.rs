@@ -1,6 +1,7 @@
 mod api;
 mod config;
 mod downloader;
+mod format;
 mod metadata;
 mod models;
 
@@ -274,23 +275,6 @@ fn create_block(title: &str, border_color: Color) -> Block<'_> {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
         .padding(Padding::horizontal(1))
-}
-
-fn progress_bar(ratio: f64, width: usize) -> String {
-    let ratio = ratio.clamp(0.0, 1.0);
-    let units = (ratio * width as f64).floor() as usize;
-    let filled = if ratio >= 1.0 {
-        width
-    } else {
-        units.min(width.saturating_sub(1))
-    };
-    let head = if ratio > 0.0 && ratio < 1.0 {
-        "╸"
-    } else {
-        ""
-    };
-    let empty = width.saturating_sub(filled + head.chars().count());
-    format!("{}{}{}", "─".repeat(filled), head, "·".repeat(empty))
 }
 
 fn tui_status_style(status: SongStatus) -> Style {
@@ -692,8 +676,8 @@ fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
         let task_items: Vec<ListItem> = tasks
             .iter()
             .map(|task| {
-                let ratio = downloader::progress_ratio(task.bytes_downloaded, task.total_bytes);
-                let bar = progress_bar(ratio, 24);
+                let ratio = format::progress_ratio(task.bytes_downloaded, task.total_bytes);
+                let bar = format::progress_bar(ratio, 24);
                 let status = Span::styled(task.status.code(), tui_status_style(task.status));
 
                 ListItem::new(Line::from(vec![
@@ -704,13 +688,13 @@ fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
                     Span::styled(
                         format!(
                             "{}/{} ",
-                            downloader::format_bytes(task.bytes_downloaded),
-                            downloader::format_bytes(task.total_bytes)
+                            format::format_bytes(task.bytes_downloaded),
+                            format::format_bytes(task.total_bytes)
                         ),
                         Style::default().fg(COLOR_SECONDARY),
                     ),
                     Span::styled(
-                        format!("{}/s ", downloader::format_bytes(task.speed_bps as u64)),
+                        format!("{}/s ", format::format_bytes(task.speed_bps as u64)),
                         Style::default().fg(COLOR_MUTED),
                     ),
                     Span::raw(task.name.clone()),
@@ -762,10 +746,10 @@ fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
         format!(
             "ALBUMS [1]  TRANSFER [2]  TAB SWITCH  Q QUIT  /  {} ACTIVE  {}/s  ETA {}  /  {} ALBUM{} LEFT  /  {} TRACK{} LEFT",
             progress.active_count(),
-            downloader::format_bytes(progress.total_speed_bps() as u64),
+            format::format_bytes(progress.total_speed_bps() as u64),
             progress
                 .eta_seconds()
-                .map(downloader::format_duration)
+                .map(format::format_duration)
                 .unwrap_or_else(|| "--:--".to_string()),
             total.saturating_sub(current),
             if total.saturating_sub(current) == 1 {
