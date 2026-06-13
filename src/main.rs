@@ -1644,4 +1644,101 @@ mod tests {
 
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn tui_state_new_initializes_correctly() {
+        let state = TuiState::new(5);
+        assert_eq!(state.screen, AppScreen::Select);
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.selected_albums, vec![false; 5]);
+        assert!(state.search_query.is_empty());
+        assert!(!state.search_active);
+        assert_eq!(state.help_overlay, HelpOverlay::Hidden);
+        assert!(state.downloaded_names.is_empty());
+        assert!(state.download_queue.is_empty());
+        assert_eq!(state.download_current, 0);
+        assert!(!state.transfer_done);
+        assert_eq!(state.active_album_idx, 0);
+        assert!(!state.confirm_quit);
+    }
+
+    #[test]
+    fn tui_state_clear_search_resets_search_state() {
+        let mut state = TuiState::new(3);
+        state.search_active = true;
+        state.search_query = "test".to_string();
+
+        state.clear_search();
+
+        assert!(!state.search_active);
+        assert!(state.search_query.is_empty());
+    }
+
+    #[test]
+    fn tui_state_help_overlay_toggles() {
+        let mut state = TuiState::new(3);
+        assert_eq!(state.help_overlay, HelpOverlay::Hidden);
+
+        state.open_help();
+        assert_eq!(state.help_overlay, HelpOverlay::Visible);
+
+        state.close_help();
+        assert_eq!(state.help_overlay, HelpOverlay::Hidden);
+    }
+
+    #[test]
+    fn tui_state_start_queue_builds_from_selected() {
+        let mut state = TuiState::new(5);
+        state.selected_albums = vec![true, false, true, false, true];
+
+        state.start_queue();
+
+        assert_eq!(state.download_queue, vec![0, 2, 4]);
+        assert_eq!(state.download_current, 0);
+        assert!(state.downloaded_names.is_empty());
+        assert!(!state.transfer_done);
+        assert!(!state.confirm_quit);
+        assert_eq!(state.active_album_idx, 0);
+    }
+
+    #[test]
+    fn tui_state_start_queue_empty_when_nothing_selected() {
+        let mut state = TuiState::new(3);
+        state.selected_albums = vec![false, false, false];
+
+        state.start_queue();
+
+        assert!(state.download_queue.is_empty());
+    }
+
+    #[test]
+    fn tui_state_clear_selection_after_done_clears_when_done() {
+        let mut state = TuiState::new(3);
+        state.selected_albums = vec![true, true, false];
+        state.transfer_done = true;
+
+        state.clear_selection_after_done();
+
+        assert_eq!(state.selected_albums, vec![false, false, false]);
+    }
+
+    #[test]
+    fn tui_state_clear_selection_after_done_noop_when_not_done() {
+        let mut state = TuiState::new(3);
+        state.selected_albums = vec![true, true, false];
+        state.transfer_done = false;
+
+        state.clear_selection_after_done();
+
+        assert_eq!(state.selected_albums, vec![true, true, false]);
+    }
+
+    #[test]
+    fn tui_state_confirm_or_quit_without_transfer_returns_true() {
+        let mut state = TuiState::new(3);
+        let handle: Option<JoinHandle<anyhow::Result<Vec<String>>>> = None;
+
+        assert!(state.confirm_or_quit(&handle));
+        assert!(!state.confirm_quit);
+    }
 }
