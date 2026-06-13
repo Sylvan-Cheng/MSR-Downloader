@@ -1,14 +1,51 @@
 use crate::models;
-use crate::tui::chrome::{create_block, draw_app_header, draw_controls_bar, draw_status_bar};
+use crate::tui::chrome::{
+    controls_line, controls_text, create_block, draw_app_header, draw_controls_bar, draw_status_bar,
+};
 use crate::tui::layout::{app_chunks, select_body_chunks};
 use crate::tui::overlay::draw_help_overlay;
 use crate::tui::state::{AppScreen, HelpOverlay};
-use crate::tui::theme::{COLOR_INFO, COLOR_MUTED, COLOR_PRIMARY, COLOR_SECONDARY, COLOR_SUCCESS};
+use crate::tui::theme::{COLOR_MUTED, COLOR_PRIMARY, COLOR_SECONDARY, COLOR_SUCCESS};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph},
 };
+
+const SELECT_SEARCH_CONTROLS: &[(&str, &str)] = &[
+    ("Type", " SEARCH  "),
+    ("Backspace", " EDIT  "),
+    ("Enter", " APPLY  "),
+    ("Esc", " CLEAR  "),
+    ("?", " HELP  "),
+    ("Q", " QUIT"),
+];
+const SELECT_TRANSFER_CONTROLS: &[(&str, &str)] = &[
+    ("↑↓", " MOVE  "),
+    ("/", " SEARCH  "),
+    ("Tab", " TRANSFER  "),
+    ("?", " HELP  "),
+    ("Q", " QUIT"),
+];
+const SELECT_EMPTY_CONTROLS: &[(&str, &str)] = &[
+    ("↑↓", " MOVE  "),
+    ("Space", " TOGGLE  "),
+    ("A", " ALL  "),
+    ("/", " SEARCH  "),
+    ("Enter", " DOWNLOAD  "),
+    ("?", " HELP  "),
+    ("Q", " QUIT"),
+];
+const SELECT_READY_CONTROLS: &[(&str, &str)] = &[
+    ("↑↓", " MOVE  "),
+    ("Space", " TOGGLE  "),
+    ("A", " ALL  "),
+    ("C", " CLEAR  "),
+    ("/", " SEARCH  "),
+    ("Enter", " DOWNLOAD  "),
+    ("?", " HELP  "),
+    ("Q", " QUIT"),
+];
 
 pub(crate) fn filtered_album_indices(albums: &[models::AlbumBrief], query: &str) -> Vec<usize> {
     let query = query.trim().to_lowercase();
@@ -141,53 +178,123 @@ pub(crate) fn draw_select_screen(
     }
 
     let count = selected_albums.iter().filter(|&&s| s).count();
-    let status_text = if search_active {
-        if visible_indices.is_empty() {
-            format!("FILTER: {}_ / NO MATCHES / ESC CLEARS", search_query)
-        } else {
-            format!(
-                "FILTER: {}_ / {} MATCHES",
-                search_query,
-                visible_indices.len()
-            )
-        }
-    } else if is_downloading {
-        format!("TRANSFER ACTIVE / {} IN QUEUE / TAB TO PROGRESS", count)
-    } else if count == 0 {
-        "NO ALBUM SELECTED".to_string()
-    } else {
-        format!("{} ALBUM{} READY", count, if count > 1 { "S" } else { "" })
-    };
+    let status_text = select_status_text(
+        count,
+        visible_indices.len(),
+        search_query,
+        search_active,
+        is_downloading,
+    );
     draw_status_bar(f, chunks[2], status_text);
 
     draw_controls_bar(
         f,
         chunks[3],
-        Line::from(vec![
-            Span::styled("↑↓", Style::default().fg(COLOR_INFO)),
-            Span::raw(" MOVE  "),
-            Span::styled("Space", Style::default().fg(COLOR_INFO)),
-            Span::raw(" SELECT  "),
-            Span::styled("A", Style::default().fg(COLOR_INFO)),
-            Span::raw(" ALL  "),
-            Span::styled("C", Style::default().fg(COLOR_INFO)),
-            Span::raw(" CLEAR  "),
-            Span::styled("/", Style::default().fg(COLOR_INFO)),
-            Span::raw(" SEARCH  "),
-            Span::styled("Esc", Style::default().fg(COLOR_INFO)),
-            Span::raw(" CLEAR FILTER  "),
-            Span::styled("Enter", Style::default().fg(COLOR_INFO)),
-            Span::raw(" DOWNLOAD  "),
-            Span::styled("Tab", Style::default().fg(COLOR_INFO)),
-            Span::raw(" PROGRESS  "),
-            Span::styled("?", Style::default().fg(COLOR_INFO)),
-            Span::raw(" HELP  "),
-            Span::styled("Q", Style::default().fg(COLOR_INFO)),
-            Span::raw(" QUIT"),
-        ]),
+        controls_line(select_control_items(search_active, is_downloading, count)),
     );
 
     if help_overlay == HelpOverlay::Visible {
         draw_help_overlay(f, chunks[1]);
+    }
+}
+
+pub(crate) fn select_status_text(
+    selected_count: usize,
+    visible_count: usize,
+    search_query: &str,
+    search_active: bool,
+    transfer_active: bool,
+) -> String {
+    if search_active {
+        if visible_count == 0 {
+            format!("FILTER \"{}\" / NO MATCHES", search_query)
+        } else {
+            format!("FILTER \"{}\" / {} MATCHES", search_query, visible_count)
+        }
+    } else if transfer_active {
+        format!(
+            "TRANSFER ACTIVE / {} ALBUM{} QUEUED",
+            selected_count,
+            if selected_count == 1 { "" } else { "S" }
+        )
+    } else if selected_count == 0 {
+        "NO ALBUM SELECTED".to_string()
+    } else {
+        format!(
+            "{} ALBUM{} READY",
+            selected_count,
+            if selected_count == 1 { "" } else { "S" }
+        )
+    }
+}
+
+pub(crate) fn select_controls_text(
+    search_active: bool,
+    transfer_active: bool,
+    selected_count: usize,
+) -> String {
+    controls_text(select_control_items(
+        search_active,
+        transfer_active,
+        selected_count,
+    ))
+}
+
+fn select_control_items(
+    search_active: bool,
+    transfer_active: bool,
+    selected_count: usize,
+) -> &'static [(&'static str, &'static str)] {
+    if search_active {
+        SELECT_SEARCH_CONTROLS
+    } else if transfer_active {
+        SELECT_TRANSFER_CONTROLS
+    } else if selected_count == 0 {
+        SELECT_EMPTY_CONTROLS
+    } else {
+        SELECT_READY_CONTROLS
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_status_stays_status_only() {
+        assert_eq!(
+            select_status_text(0, 5, "", false, false),
+            "NO ALBUM SELECTED"
+        );
+        assert_eq!(select_status_text(1, 5, "", false, false), "1 ALBUM READY");
+        assert_eq!(select_status_text(3, 5, "", false, false), "3 ALBUMS READY");
+        assert_eq!(
+            select_status_text(3, 5, "ark", true, false),
+            "FILTER \"ark\" / 5 MATCHES"
+        );
+        assert_eq!(
+            select_status_text(3, 0, "ark", true, false),
+            "FILTER \"ark\" / NO MATCHES"
+        );
+        assert_eq!(
+            select_status_text(2, 5, "", false, true),
+            "TRANSFER ACTIVE / 2 ALBUMS QUEUED"
+        );
+    }
+
+    #[test]
+    fn select_controls_follow_interaction_mode() {
+        assert_eq!(
+            select_controls_text(true, false, 0),
+            "Type SEARCH  Backspace EDIT  Enter APPLY  Esc CLEAR  ? HELP  Q QUIT"
+        );
+        assert_eq!(
+            select_controls_text(false, true, 2),
+            "↑↓ MOVE  / SEARCH  Tab TRANSFER  ? HELP  Q QUIT"
+        );
+        assert!(!select_controls_text(false, true, 2).contains("Enter DOWNLOAD"));
+        assert!(select_controls_text(false, false, 0).contains("Enter DOWNLOAD"));
+        assert!(!select_controls_text(false, false, 0).contains("C CLEAR"));
+        assert!(select_controls_text(false, false, 1).contains("C CLEAR"));
     }
 }

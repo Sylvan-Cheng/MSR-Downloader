@@ -20,8 +20,9 @@ pub(crate) fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
         Line::raw(""),
         Line::raw("Albums: Up/Down move, PageUp/PageDown jump, Home/End first/last"),
         Line::raw("Select: Space toggles one album, A toggles filtered albums, C clears queue"),
-        Line::raw("Search: / starts typing, Enter accepts, Esc clears filter"),
-        Line::raw("Transfer: Tab switches screens, Q quits or asks before aborting active work"),
+        Line::raw("Search: / starts typing, Enter applies, Esc clears filter"),
+        Line::raw("Transfer: 1/2 or Tab switches pages"),
+        Line::raw("Abort: Q asks before aborting active work, Y confirms, N/Esc cancels"),
         Line::raw(""),
         Line::from(vec![
             Span::styled("Esc", Style::default().fg(COLOR_INFO)),

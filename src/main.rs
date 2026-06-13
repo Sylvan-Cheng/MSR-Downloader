@@ -395,7 +395,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                         &albums,
                         state.selected,
                         &state.selected_albums,
-                        download_handle.is_some() || state.transfer_done,
+                        download_handle.is_some(),
                         &state.search_query,
                         state.search_active,
                         state.help_overlay,

@@ -1,7 +1,9 @@
 use crate::format;
 use crate::models;
 use crate::progress::DownloadProgress;
-use crate::tui::chrome::{create_block, draw_app_header, draw_controls_bar, draw_status_bar};
+use crate::tui::chrome::{
+    controls_line, controls_text, create_block, draw_app_header, draw_controls_bar, draw_status_bar,
+};
 use crate::tui::layout::app_chunks;
 use crate::tui::state::{AppScreen, DownloadScreen};
 use crate::tui::theme::{
@@ -15,6 +17,15 @@ use ratatui::{
     widgets::{List, ListItem, Paragraph, Wrap},
 };
 use std::sync::{Arc, Mutex};
+
+const DOWNLOAD_CONTROLS: &[(&str, &str)] = &[
+    ("1", " ALBUMS  "),
+    ("Tab", " ALBUMS  "),
+    ("?", " HELP  "),
+    ("Q", " QUIT"),
+];
+const DOWNLOAD_CONFIRM_CONTROLS: &[(&str, &str)] =
+    &[("Y", " ABORT  "), ("N", " CANCEL  "), ("Esc", " CANCEL")];
 
 pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
     let DownloadScreen {
@@ -93,7 +104,10 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
                 .count();
             let is_completed = !incomplete && (done || album_pos < queue_pos);
             let (marker, style) = if incomplete {
-                ("...", Style::default().fg(COLOR_MUTED).add_modifier(Modifier::DIM))
+                (
+                    "...",
+                    Style::default().fg(COLOR_MUTED).add_modifier(Modifier::DIM),
+                )
             } else if is_completed {
                 (
                     "OK ",
@@ -194,14 +208,6 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
             )));
         }
 
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::styled("TAB", Style::default().fg(COLOR_INFO)),
-            Span::raw(" BACK TO ALBUMS  "),
-            Span::styled("Q", Style::default().fg(COLOR_INFO)),
-            Span::raw(" QUIT"),
-        ]));
-
         let summary = Paragraph::new(lines)
             .block(create_block("TRANSFER SUMMARY", COLOR_MUTED))
             .wrap(Wrap { trim: true });
@@ -252,78 +258,82 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
         }
     }
 
-    let status_text = if confirm_quit {
-        "ABORT ACTIVE DOWNLOAD?  Y CONFIRM  N/ESC CANCEL  /  PARTIAL .part FILES ARE KEPT FOR RESUME".to_string()
+    let status_text = download_status_text(confirm_quit, is_idle, done, current, total, progress);
+    draw_status_bar(f, chunks[2], status_text);
+    draw_controls_bar(
+        f,
+        chunks[3],
+        controls_line(download_control_items(confirm_quit)),
+    );
+}
+
+pub(crate) fn download_status_text(
+    confirm_quit: bool,
+    is_idle: bool,
+    done: bool,
+    current_album: usize,
+    total_albums: usize,
+    progress: &DownloadProgress,
+) -> String {
+    if confirm_quit {
+        "ABORT CONFIRMATION: PARTIAL .part FILES WILL BE KEPT FOR RESUME".to_string()
     } else if is_idle {
-        "ALBUMS [1]  TRANSFER [2]  TAB SWITCH  Q QUIT  /  NO ACTIVE TRANSFER".to_string()
+        "NO ACTIVE TRANSFER".to_string()
     } else if done {
-        if progress.failed_count() > 0 || !progress.errors.is_empty() {
+        let issue_count = progress.failed_count() + progress.errors.len();
+        if issue_count > 0 {
             format!(
-                "TAB ALBUMS  Q QUIT  /  TRANSFER INCOMPLETE  /  {} OK  {} SKIPPED  {} ISSUE{}",
+                "INCOMPLETE: {} OK / {} SKIPPED / {} ISSUE{}",
                 progress.ok_count(),
                 progress.skipped_count(),
-                progress.failed_count() + progress.errors.len(),
-                if progress.failed_count() + progress.errors.len() == 1 {
-                    ""
-                } else {
-                    "S"
-                }
+                issue_count,
+                if issue_count == 1 { "" } else { "S" }
             )
         } else {
             format!(
-                "TAB ALBUMS  Q QUIT  /  TRANSFER COMPLETE  /  {} OK  {} SKIPPED",
+                "COMPLETE: {} OK / {} SKIPPED",
                 progress.ok_count(),
                 progress.skipped_count()
             )
         }
     } else if let Some(error) = progress.errors.last() {
-        format!("TAB ALBUMS  Q QUIT  /  LAST ERROR: {}", error)
+        format!("LAST ERROR: {}", error)
     } else {
+        let albums_left = total_albums.saturating_sub(current_album);
+        let tracks_left = progress
+            .total_songs
+            .saturating_sub(progress.completed_songs);
         format!(
-            "ALBUMS [1]  TRANSFER [2]  TAB SWITCH  Q QUIT  /  {} ACTIVE  {}/s  ETA {}  /  {} ALBUM{} LEFT  /  {} TRACK{} LEFT",
+            "ACTIVE: {} TRACK{} / {}/s / ETA {} / {} ALBUM{} LEFT / {} TRACK{} LEFT",
             progress.active_count(),
+            if progress.active_count() == 1 {
+                ""
+            } else {
+                "S"
+            },
             format::format_bytes(progress.total_speed_bps() as u64),
             progress
                 .eta_seconds()
                 .map(format::format_duration)
                 .unwrap_or_else(|| "--:--".to_string()),
-            total.saturating_sub(current),
-            if total.saturating_sub(current) == 1 {
-                ""
-            } else {
-                "S"
-            },
-            progress
-                .total_songs
-                .saturating_sub(progress.completed_songs),
-            if progress
-                .total_songs
-                .saturating_sub(progress.completed_songs)
-                == 1
-            {
-                ""
-            } else {
-                "S"
-            }
+            albums_left,
+            if albums_left == 1 { "" } else { "S" },
+            tracks_left,
+            if tracks_left == 1 { "" } else { "S" }
         )
-    };
-    draw_status_bar(f, chunks[2], status_text);
-    draw_controls_bar(
-        f,
-        chunks[3],
-        Line::from(vec![
-            Span::styled("1", Style::default().fg(COLOR_INFO)),
-            Span::raw(" ALBUMS  "),
-            Span::styled("2", Style::default().fg(COLOR_INFO)),
-            Span::raw(" TRANSFER  "),
-            Span::styled("Tab", Style::default().fg(COLOR_INFO)),
-            Span::raw(" SWITCH  "),
-            Span::styled("?", Style::default().fg(COLOR_INFO)),
-            Span::raw(" HELP  "),
-            Span::styled("Q", Style::default().fg(COLOR_INFO)),
-            Span::raw(if confirm_quit { " ABORT? Y/N" } else { " QUIT" }),
-        ]),
-    );
+    }
+}
+
+pub(crate) fn download_controls_text(confirm_quit: bool) -> String {
+    controls_text(download_control_items(confirm_quit))
+}
+
+fn download_control_items(confirm_quit: bool) -> &'static [(&'static str, &'static str)] {
+    if confirm_quit {
+        DOWNLOAD_CONFIRM_CONTROLS
+    } else {
+        DOWNLOAD_CONTROLS
+    }
 }
 
 pub(crate) fn is_transfer_idle(done: bool, total_albums: usize, total_songs: usize) -> bool {
@@ -341,4 +351,69 @@ pub(crate) fn current_transfer_index(
         .enumerate()
         .find(|(_, album_idx)| albums[**album_idx].name == album_name)
         .map(|(queue_idx, album_idx)| (queue_idx, *album_idx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::progress::SongStatus;
+
+    #[test]
+    fn download_status_stays_status_only() {
+        let progress = DownloadProgress::new("", 0);
+
+        assert_eq!(
+            download_status_text(true, false, false, 1, 1, &progress),
+            "ABORT CONFIRMATION: PARTIAL .part FILES WILL BE KEPT FOR RESUME"
+        );
+        assert_eq!(
+            download_status_text(false, true, false, 1, 0, &progress),
+            "NO ACTIVE TRANSFER"
+        );
+    }
+
+    #[test]
+    fn download_status_summarizes_active_transfer() {
+        let mut progress = DownloadProgress::new("album", 2);
+        progress.completed_songs = 1;
+        let task = progress.task_mut_or_insert(1, "song", SongStatus::Getting);
+        task.bytes_downloaded = 1024 * 1024;
+        task.total_bytes = 2 * 1024 * 1024;
+        task.speed_bps = 1024.0 * 1024.0;
+
+        assert_eq!(
+            download_status_text(false, false, false, 1, 2, &progress),
+            "ACTIVE: 1 TRACK / 1.0 MB/s / ETA 00:01 / 1 ALBUM LEFT / 1 TRACK LEFT"
+        );
+    }
+
+    #[test]
+    fn download_status_summarizes_done_transfer() {
+        let mut progress = DownloadProgress::new("album", 3);
+        progress.task_mut_or_insert(1, "ok", SongStatus::Done);
+        progress.task_mut_or_insert(2, "skip", SongStatus::Skipped);
+
+        assert_eq!(
+            download_status_text(false, false, true, 1, 1, &progress),
+            "COMPLETE: 1 OK / 1 SKIPPED"
+        );
+
+        progress.task_mut_or_insert(3, "failed", SongStatus::Failed);
+        assert_eq!(
+            download_status_text(false, false, true, 1, 1, &progress),
+            "INCOMPLETE: 1 OK / 1 SKIPPED / 1 ISSUE"
+        );
+    }
+
+    #[test]
+    fn download_controls_follow_confirmation_mode() {
+        assert_eq!(
+            download_controls_text(false),
+            "1 ALBUMS  Tab ALBUMS  ? HELP  Q QUIT"
+        );
+        assert_eq!(
+            download_controls_text(true),
+            "Y ABORT  N CANCEL  Esc CANCEL"
+        );
+    }
 }
