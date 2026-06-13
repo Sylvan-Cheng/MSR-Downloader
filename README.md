@@ -25,8 +25,11 @@ msr-downloader --cli --list
 # 下载指定专辑
 msr-downloader --cli --album "相变临界" "Innocence"
 
+# 下载全部专辑（必须显式确认）
+msr-downloader --cli --all
+
 # 指定输出目录
-msr-downloader --cli --output ./music
+msr-downloader --cli --all --output ./music
 
 # 日志友好的纯文本输出，不使用 ANSI 光标控制
 msr-downloader --cli --plain --album "相变临界"

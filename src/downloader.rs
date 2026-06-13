@@ -1120,12 +1120,7 @@ pub async fn download_albums_by_name(
         .collect();
 
     if matched.is_empty() {
-        println!(
-            "{} {}",
-            "ERR".red().bold(),
-            "NO ALBUMS MATCHED THE GIVEN NAMES.".red()
-        );
-        return Ok(());
+        anyhow::bail!("no albums matched the given names; use --list to inspect available albums");
     }
 
     println!(

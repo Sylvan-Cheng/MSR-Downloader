@@ -72,6 +72,8 @@ struct Cli {
     #[arg(short, long)]
     list: bool,
     #[arg(long)]
+    all: bool,
+    #[arg(long)]
     cli: bool,
     #[arg(long)]
     plain: bool,
@@ -1133,7 +1135,7 @@ async fn main() -> anyhow::Result<()> {
 
     let api = ApiClient::new(&config.api)?;
 
-    if !cli.cli && !cli.list && cli.album.is_none() {
+    if !cli.cli && !cli.list && !cli.all && cli.album.is_none() {
         run_tui(&api, &config).await?;
         return Ok(());
     }
@@ -1158,8 +1160,10 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(names) = cli.album {
         downloader::download_albums_by_name(&api, &config, &names, cli_progress_mode).await?;
-    } else {
+    } else if cli.all {
         downloader::download_all(&api, &config, cli_progress_mode).await?;
+    } else {
+        anyhow::bail!("no CLI action selected; use --list, --album <name>, or --all");
     }
 
     println!("\n{}", "MSR// TRANSFER COMPLETE".cyan().bold());
