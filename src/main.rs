@@ -85,6 +85,10 @@ struct Cli {
     print_config: bool,
     #[arg(long)]
     clean_parts: bool,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long)]
+    yes: bool,
 }
 
 fn print_config_summary(config: &Config) {
@@ -110,27 +114,59 @@ fn print_config_summary(config: &Config) {
     );
 }
 
-fn clean_partial_files(dir: &std::path::Path) -> anyhow::Result<usize> {
-    if !dir.exists() {
-        return Ok(0);
+fn collect_partial_files(dir: &std::path::Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    if !dir.try_exists()? {
+        return Ok(());
     }
 
-    let mut removed = 0usize;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() {
-            removed += clean_partial_files(&path)?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+
+        if metadata.is_dir() {
+            collect_partial_files(&path, files)?;
         } else if path
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.ends_with(".part"))
         {
-            std::fs::remove_file(&path)?;
-            removed += 1;
+            files.push(path);
         }
     }
-    Ok(removed)
+    Ok(())
+}
+
+fn clean_partial_files(dir: &std::path::Path, dry_run: bool, yes: bool) -> anyhow::Result<usize> {
+    let mut partial_files = Vec::new();
+    collect_partial_files(dir, &mut partial_files)?;
+
+    println!(
+        "{} SCANNED {} / {} PARTIAL FILE{} FOUND",
+        "MSR//".cyan().bold(),
+        dir.display(),
+        partial_files.len(),
+        if partial_files.len() == 1 { "" } else { "S" }
+    );
+
+    if dry_run {
+        for file in &partial_files {
+            println!("  {}", file.display());
+        }
+        return Ok(0);
+    }
+
+    if !partial_files.is_empty() && !yes {
+        anyhow::bail!("refusing to delete partial files without --yes; use --dry-run to preview");
+    }
+
+    for file in &partial_files {
+        std::fs::remove_file(file)?;
+    }
+    Ok(partial_files.len())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1202,7 +1238,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if cli.clean_parts {
-        let removed = clean_partial_files(&config.download.output_dir)?;
+        let removed = clean_partial_files(&config.download.output_dir, cli.dry_run, cli.yes)?;
         println!(
             "{} {} PARTIAL FILE{} REMOVED",
             "MSR//".cyan().bold(),
@@ -1330,5 +1366,32 @@ mod tests {
         assert!(!is_transfer_idle(false, 1, 0));
         assert!(!is_transfer_idle(false, 0, 1));
         assert!(!is_transfer_idle(true, 0, 0));
+    }
+
+    #[test]
+    fn collect_partial_files_finds_nested_part_files() {
+        let root = std::env::temp_dir().join(format!(
+            "msr-downloader-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(root.join("keep.txt"), b"keep").unwrap();
+        std::fs::write(root.join("track.mp3.part"), b"partial").unwrap();
+        std::fs::write(nested.join("cover.jpg.part"), b"partial").unwrap();
+
+        let mut files = Vec::new();
+        collect_partial_files(&root, &mut files).unwrap();
+        files.sort();
+
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&root.join("track.mp3.part")));
+        assert!(files.contains(&nested.join("cover.jpg.part")));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

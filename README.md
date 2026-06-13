@@ -43,8 +43,11 @@ msr-downloader --cli --concurrency 2 --album "相变临界"
 # 查看最终配置
 msr-downloader --print-config
 
-# 清理输出目录中的 .part 断点文件
-msr-downloader --clean-parts
+# 预览输出目录中的 .part 断点文件
+msr-downloader --clean-parts --dry-run
+
+# 删除输出目录中的 .part 断点文件
+msr-downloader --clean-parts --yes
 ```
 
 ### TUI 快捷键
