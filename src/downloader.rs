@@ -1088,6 +1088,7 @@ pub async fn download_all(
     let albums = api.get_albums().await?;
     println!("{} {} ALBUMS", "MSR//".cyan().bold(), albums.len());
 
+    let mut failures = Vec::new();
     for (i, album_brief) in albums.iter().enumerate() {
         println!(
             "\n{} [{}/{}] {}",
@@ -1096,8 +1097,28 @@ pub async fn download_all(
             albums.len(),
             album_brief.name.white().bold()
         );
-        let album_detail = api.get_album_detail(&album_brief.cid).await?;
-        download_album(api, &album_detail, config, progress_mode).await?;
+        match api.get_album_detail(&album_brief.cid).await {
+            Ok(album_detail) => {
+                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
+                    let message = format!("{}: {}", album_brief.name, e);
+                    eprintln!("{} {}", "ERR".red().bold(), message.red());
+                    failures.push(message);
+                }
+            }
+            Err(e) => {
+                let message = format!("{}: {}", album_brief.name, e);
+                eprintln!("{} {}", "ERR".red().bold(), message.red());
+                failures.push(message);
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{} album(s) failed: {}",
+            failures.len(),
+            failures.join("; ")
+        );
     }
 
     Ok(())
@@ -1129,14 +1150,35 @@ pub async fn download_albums_by_name(
         matched.len()
     );
 
+    let mut failures = Vec::new();
     for album_brief in matched {
         println!(
             "\n{} {}",
             "ALBUM".cyan().bold(),
             album_brief.name.white().bold()
         );
-        let album_detail = api.get_album_detail(&album_brief.cid).await?;
-        download_album(api, &album_detail, config, progress_mode).await?;
+        match api.get_album_detail(&album_brief.cid).await {
+            Ok(album_detail) => {
+                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
+                    let message = format!("{}: {}", album_brief.name, e);
+                    eprintln!("{} {}", "ERR".red().bold(), message.red());
+                    failures.push(message);
+                }
+            }
+            Err(e) => {
+                let message = format!("{}: {}", album_brief.name, e);
+                eprintln!("{} {}", "ERR".red().bold(), message.red());
+                failures.push(message);
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{} album(s) failed: {}",
+            failures.len(),
+            failures.join("; ")
+        );
     }
 
     Ok(())

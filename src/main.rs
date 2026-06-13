@@ -154,6 +154,7 @@ struct DownloadScreen<'a> {
     progress: &'a DownloadProgress,
     downloaded: &'a [String],
     done: bool,
+    confirm_quit: bool,
 }
 
 fn filtered_album_indices(albums: &[models::AlbumBrief], query: &str) -> Vec<usize> {
@@ -432,13 +433,14 @@ fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
         progress,
         downloaded,
         done,
+        confirm_quit,
     } = state;
     let chunks = app_chunks(f.area());
 
     let is_idle = is_transfer_idle(done, total, progress.total_songs);
     let title_color = if is_idle {
         COLOR_MUTED
-    } else if done && progress.failed_count() > 0 {
+    } else if done && (progress.failed_count() > 0 || !progress.errors.is_empty()) {
         COLOR_ERROR
     } else if done {
         COLOR_SUCCESS
@@ -448,11 +450,16 @@ fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
     let title_text = if is_idle {
         "TRANSFER IDLE / NO ACTIVE QUEUE".to_string()
     } else if done {
-        if progress.failed_count() > 0 {
+        if progress.failed_count() > 0 || !progress.errors.is_empty() {
             format!(
-                "TRANSFER INCOMPLETE / {} OK / {} FAILED",
+                "TRANSFER INCOMPLETE / {} OK / {} ISSUE{}",
                 progress.ok_count(),
-                progress.failed_count()
+                progress.failed_count() + progress.errors.len(),
+                if progress.failed_count() + progress.errors.len() == 1 {
+                    ""
+                } else {
+                    "S"
+                }
             )
         } else {
             format!(
@@ -556,10 +563,10 @@ fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
             ),
         ])];
 
-        if progress.failed_count() > 0 {
+        if progress.failed_count() > 0 || !progress.errors.is_empty() {
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
-                "FAILED TRACKS",
+                "ISSUES",
                 Style::default()
                     .fg(COLOR_ERROR)
                     .add_modifier(Modifier::BOLD),
@@ -568,6 +575,12 @@ fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
                 lines.push(Line::from(vec![
                     Span::styled("ERR ", Style::default().fg(COLOR_ERROR)),
                     Span::raw(task.name.clone()),
+                ]));
+            }
+            for error in progress.errors.iter().take(8) {
+                lines.push(Line::from(vec![
+                    Span::styled("ERR ", Style::default().fg(COLOR_ERROR)),
+                    Span::raw(error.clone()),
                 ]));
             }
         } else {
@@ -638,15 +651,22 @@ fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
         }
     }
 
-    let status_text = if is_idle {
+    let status_text = if confirm_quit {
+        "ABORT ACTIVE DOWNLOAD?  Y CONFIRM  N/ESC CANCEL  /  PARTIAL .part FILES ARE KEPT FOR RESUME".to_string()
+    } else if is_idle {
         "ALBUMS [1]  TRANSFER [2]  TAB SWITCH  Q QUIT  /  NO ACTIVE TRANSFER".to_string()
     } else if done {
-        if progress.failed_count() > 0 {
+        if progress.failed_count() > 0 || !progress.errors.is_empty() {
             format!(
-                "TAB ALBUMS  Q QUIT  /  TRANSFER INCOMPLETE  /  {} OK  {} SKIPPED  {} FAILED",
+                "TAB ALBUMS  Q QUIT  /  TRANSFER INCOMPLETE  /  {} OK  {} SKIPPED  {} ISSUE{}",
                 progress.ok_count(),
                 progress.skipped_count(),
-                progress.failed_count()
+                progress.failed_count() + progress.errors.len(),
+                if progress.failed_count() + progress.errors.len() == 1 {
+                    ""
+                } else {
+                    "S"
+                }
             )
         } else {
             format!(
@@ -698,7 +718,7 @@ fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
             Span::styled("Tab", Style::default().fg(COLOR_INFO)),
             Span::raw(" SWITCH  "),
             Span::styled("Q", Style::default().fg(COLOR_INFO)),
-            Span::raw(" QUIT"),
+            Span::raw(if confirm_quit { " ABORT? Y/N" } else { " QUIT" }),
         ]),
     );
 }
@@ -829,6 +849,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
     let mut download_current = 0usize;
     let mut transfer_done = false;
     let mut active_album_idx = 0usize;
+    let mut confirm_quit = false;
     let mut download_handle: Option<JoinHandle<anyhow::Result<Vec<String>>>> = None;
 
     let progress = Arc::new(Mutex::new(DownloadProgress::new("", 0)));
@@ -842,7 +863,6 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                             downloaded_names = names;
                         }
                         Ok(Err(e)) => {
-                            downloaded_names.clear();
                             if let Ok(mut prog) = progress.lock() {
                                 prog.errors.push(format!("Download error: {}", e));
                             }
@@ -892,7 +912,14 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                             KeyCode::Char(ch) if search_active => {
                                 search_query.push(ch);
                             }
-                            code if is_key(code, 'q') => break,
+                            code if is_key(code, 'q') => {
+                                if download_handle.is_some() && !transfer_done {
+                                    confirm_quit = true;
+                                    screen = AppScreen::Downloading;
+                                } else {
+                                    break;
+                                }
+                            }
                             KeyCode::Char('1') => screen = AppScreen::Select,
                             KeyCode::Char('2') => screen = AppScreen::Downloading,
                             KeyCode::Tab => screen = AppScreen::Downloading,
@@ -929,6 +956,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                     download_current = 0;
                                     downloaded_names.clear();
                                     transfer_done = false;
+                                    confirm_quit = false;
                                     active_album_idx = download_queue[0];
                                     *progress.lock().expect("progress lock poisoned") =
                                         DownloadProgress::new("Preparing...", 0);
@@ -942,9 +970,25 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                         .collect();
                                     download_handle = Some(tokio::spawn(async move {
                                         let mut downloaded = Vec::new();
+                                        let mut failures = Vec::new();
                                         for (_, album) in queued_albums {
-                                            let album_detail =
-                                                api_clone.get_album_detail(&album.cid).await?;
+                                            let album_detail = match api_clone
+                                                .get_album_detail(&album.cid)
+                                                .await
+                                            {
+                                                Ok(album_detail) => album_detail,
+                                                Err(e) => {
+                                                    let message = format!(
+                                                        "Album {} detail error: {}",
+                                                        album.name, e
+                                                    );
+                                                    if let Ok(mut prog) = progress_clone.lock() {
+                                                        prog.errors.push(message.clone());
+                                                    }
+                                                    failures.push(message);
+                                                    continue;
+                                                }
+                                            };
                                             if let Ok(mut prog) = progress_clone.lock() {
                                                 *prog = DownloadProgress::new(
                                                     &album_detail.name,
@@ -957,8 +1001,32 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                                 &config_clone,
                                                 Some(progress_clone.clone()),
                                             )
-                                            .await?;
-                                            downloaded.push(album.name);
+                                            .await
+                                            .map(|_| downloaded.push(album.name.clone()))
+                                            .unwrap_or_else(|e| {
+                                                let message = format!(
+                                                    "Album {} download error: {}",
+                                                    album.name, e
+                                                );
+                                                if let Ok(mut prog) = progress_clone.lock() {
+                                                    prog.errors.push(message.clone());
+                                                }
+                                                failures.push(message);
+                                            });
+                                        }
+                                        if !failures.is_empty() {
+                                            if let Ok(mut prog) = progress_clone.lock() {
+                                                for failure in &failures {
+                                                    if !prog.errors.contains(failure) {
+                                                        prog.errors.push(failure.clone());
+                                                    }
+                                                }
+                                            }
+                                            anyhow::bail!(
+                                                "{} album(s) failed: {}",
+                                                failures.len(),
+                                                failures.join("; ")
+                                            );
                                         }
                                         Ok(downloaded)
                                     }));
@@ -1047,6 +1115,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                 progress: &prog,
                                 downloaded: &downloaded_names,
                                 done: transfer_done,
+                                confirm_quit,
                             },
                         );
                     })?;
@@ -1055,7 +1124,17 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                 if event::poll(std::time::Duration::from_millis(80))? {
                     match event::read()? {
                         Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                            code if is_key(code, 'q') => break,
+                            code if is_key(code, 'q') => {
+                                if download_handle.is_some() && !transfer_done {
+                                    confirm_quit = true;
+                                } else {
+                                    break;
+                                }
+                            }
+                            code if confirm_quit && is_key(code, 'y') => break,
+                            code if confirm_quit && (is_key(code, 'n') || code == KeyCode::Esc) => {
+                                confirm_quit = false;
+                            }
                             KeyCode::Char('1') => {
                                 if transfer_done {
                                     selected_albums.fill(false);
