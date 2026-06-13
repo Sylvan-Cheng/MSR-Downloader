@@ -67,6 +67,24 @@ pub struct SongProgress {
 }
 
 impl SongProgress {
+    fn new(index: usize, name: &str, status: SongStatus) -> Self {
+        Self {
+            index,
+            name: name.to_string(),
+            bytes_downloaded: 0,
+            total_bytes: 0,
+            status,
+            resumed: false,
+            resume_from: 0,
+            attempt: 0,
+            speed_bps: 0.0,
+            last_update: Some(Instant::now()),
+            done: false,
+            skipped: false,
+            failed: false,
+        }
+    }
+
     fn active_for_plain_output(&self) -> bool {
         matches!(
             self.status,
@@ -176,6 +194,24 @@ impl DownloadProgress {
         } else {
             None
         }
+    }
+
+    fn task_mut_or_insert(
+        &mut self,
+        index: usize,
+        name: &str,
+        status: SongStatus,
+    ) -> &mut SongProgress {
+        if let Some(position) = self.tasks.iter().position(|task| task.index == index) {
+            let task = &mut self.tasks[position];
+            task.name = name.to_string();
+            task.status = status;
+            task.last_update = Some(Instant::now());
+            return task;
+        }
+
+        self.tasks.push(SongProgress::new(index, name, status));
+        self.tasks.last_mut().expect("task inserted")
     }
 }
 
@@ -310,59 +346,32 @@ fn update_progress(
     if let Some(ref p) = progress {
         if let Ok(mut prog) = p.lock() {
             let now = Instant::now();
-            if let Some(task) = prog
-                .tasks
-                .iter_mut()
-                .find(|task| task.index == current_song)
-            {
-                let previous_bytes = task.bytes_downloaded;
-                let previous_update = task.last_update;
-                task.name = song_name.to_string();
-                task.bytes_downloaded = file_progress.downloaded;
-                task.total_bytes = file_progress.total;
-                task.resumed = file_progress.resumed;
-                task.resume_from = file_progress.resume_from;
-                task.attempt = file_progress.attempt;
-                task.status = if file_progress.resumed {
-                    SongStatus::Resuming
-                } else {
-                    SongStatus::Getting
-                };
-                if let Some(previous_update) = previous_update {
-                    let elapsed = now.duration_since(previous_update).as_secs_f64();
-                    let bytes_since = file_progress.downloaded.saturating_sub(previous_bytes);
-                    if elapsed > 0.0 && bytes_since > 0 {
-                        let instant_speed = bytes_since as f64 / elapsed;
-                        task.speed_bps = if task.speed_bps > 0.0 {
-                            task.speed_bps * 0.7 + instant_speed * 0.3
-                        } else {
-                            instant_speed
-                        };
-                    }
+            let status = if file_progress.resumed {
+                SongStatus::Resuming
+            } else {
+                SongStatus::Getting
+            };
+            let task = prog.task_mut_or_insert(current_song, song_name, status);
+            let previous_bytes = task.bytes_downloaded;
+            let previous_update = task.last_update;
+            task.bytes_downloaded = file_progress.downloaded;
+            task.total_bytes = file_progress.total;
+            task.resumed = file_progress.resumed;
+            task.resume_from = file_progress.resume_from;
+            task.attempt = file_progress.attempt;
+            if let Some(previous_update) = previous_update {
+                let elapsed = now.duration_since(previous_update).as_secs_f64();
+                let bytes_since = file_progress.downloaded.saturating_sub(previous_bytes);
+                if elapsed > 0.0 && bytes_since > 0 {
+                    let instant_speed = bytes_since as f64 / elapsed;
+                    task.speed_bps = if task.speed_bps > 0.0 {
+                        task.speed_bps * 0.7 + instant_speed * 0.3
+                    } else {
+                        instant_speed
+                    };
                 }
-                task.last_update = Some(now);
-                return;
             }
-
-            prog.tasks.push(SongProgress {
-                index: current_song,
-                name: song_name.to_string(),
-                bytes_downloaded: file_progress.downloaded,
-                total_bytes: file_progress.total,
-                status: if file_progress.resumed {
-                    SongStatus::Resuming
-                } else {
-                    SongStatus::Getting
-                },
-                resumed: file_progress.resumed,
-                resume_from: file_progress.resume_from,
-                attempt: file_progress.attempt,
-                speed_bps: 0.0,
-                last_update: Some(now),
-                done: false,
-                skipped: false,
-                failed: false,
-            });
+            task.last_update = Some(now);
         }
     }
 }
@@ -375,32 +384,7 @@ fn set_progress_status(
 ) {
     if let Some(ref p) = progress {
         if let Ok(mut prog) = p.lock() {
-            if let Some(task) = prog
-                .tasks
-                .iter_mut()
-                .find(|task| task.index == current_song)
-            {
-                task.name = song_name.to_string();
-                task.status = status;
-                task.last_update = Some(Instant::now());
-                return;
-            }
-
-            prog.tasks.push(SongProgress {
-                index: current_song,
-                name: song_name.to_string(),
-                bytes_downloaded: 0,
-                total_bytes: 0,
-                status,
-                resumed: false,
-                resume_from: 0,
-                attempt: 0,
-                speed_bps: 0.0,
-                last_update: Some(Instant::now()),
-                done: false,
-                skipped: false,
-                failed: false,
-            });
+            prog.task_mut_or_insert(current_song, song_name, status);
         }
     }
 }
