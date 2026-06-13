@@ -777,22 +777,3 @@ fn print_matched_albums(label: &str, albums: &[&crate::models::AlbumBrief]) {
         println!("  {}  {}", album.cid.dimmed(), album.name);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::models::SongDetail;
-
-    #[allow(dead_code)]
-    fn song_detail(cid: &str, name: &str) -> SongDetail {
-        SongDetail {
-            cid: cid.to_string(),
-            name: name.to_string(),
-            album_cid: "album".to_string(),
-            source_url: "https://example.com/song.wav".to_string(),
-            lyric_url: None,
-            mv_url: None,
-            mv_cover_url: None,
-            artists: Vec::new(),
-        }
-    }
-}

@@ -198,6 +198,20 @@ fn clean_partial_files(dir: &std::path::Path, dry_run: bool, yes: bool) -> anyho
     Ok(partial_files.len())
 }
 
+fn validate_cli_action(cli: &Cli) -> anyhow::Result<()> {
+    if cli.album.is_some() && cli.album_id.is_some() {
+        anyhow::bail!("use either --album or --album-id, not both");
+    }
+
+    if cli.cli && !cli.list && !cli.all && cli.album.is_none() && cli.album_id.is_none() {
+        anyhow::bail!(
+            "no CLI action selected; use --list, --album <name>, --album-id <cid>, or --all"
+        );
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppScreen {
     Select,
@@ -1441,8 +1455,8 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let mut config = Config::load(cli.config.as_deref())?;
 
-    if let Some(output) = cli.output {
-        config.download.output_dir = output;
+    if let Some(output) = cli.output.as_ref() {
+        config.download.output_dir = output.clone();
     }
 
     if let Some(concurrency) = cli.concurrency {
@@ -1467,11 +1481,9 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let api = ApiClient::new(&config.api)?;
+    validate_cli_action(&cli)?;
 
-    if cli.album.is_some() && cli.album_id.is_some() {
-        anyhow::bail!("use either --album or --album-id, not both");
-    }
+    let api = ApiClient::new(&config.api)?;
 
     if !cli.cli && !cli.list && !cli.all && cli.album.is_none() && cli.album_id.is_none() {
         println!(
@@ -1520,7 +1532,9 @@ async fn main() -> anyhow::Result<()> {
         downloader::download_all(&api, &config, cli_progress_mode).await?;
         true
     } else {
-        anyhow::bail!("no CLI action selected; use --list, --album <name>, or --all");
+        anyhow::bail!(
+            "no CLI action selected; use --list, --album <name>, --album-id <cid>, or --all"
+        );
     };
 
     if performed_download {
@@ -1745,18 +1759,16 @@ mod tests {
     #[test]
     fn cli_requires_explicit_action_in_cli_mode() {
         let cli = Cli::try_parse_from(["msr-downloader", "--cli"]).unwrap();
-        assert!(cli.cli);
-        assert!(cli.album.is_none());
-        assert!(cli.album_id.is_none());
-        assert!(!cli.all);
-        assert!(!cli.list);
+        let error = validate_cli_action(&cli).unwrap_err().to_string();
+
+        assert!(error.contains("no CLI action selected"));
     }
 
     #[test]
     fn cli_all_flag_parses() {
         let cli = Cli::try_parse_from(["msr-downloader", "--cli", "--all"]).unwrap();
-        assert!(cli.cli);
-        assert!(cli.all);
+
+        assert!(validate_cli_action(&cli).is_ok());
     }
 
     #[test]
@@ -1770,15 +1782,18 @@ mod tests {
             "123",
         ])
         .unwrap();
-        assert!(cli.album.is_some());
-        assert!(cli.album_id.is_some());
+        let error = validate_cli_action(&cli).unwrap_err().to_string();
+
+        assert!(error.contains("use either --album or --album-id"));
     }
 
     #[test]
     fn cli_dry_run_flag_parses() {
         let cli = Cli::try_parse_from(["msr-downloader", "--cli", "--album", "test", "--dry-run"])
             .unwrap();
+
         assert!(cli.dry_run);
+        assert!(validate_cli_action(&cli).is_ok());
     }
 
     #[test]
