@@ -18,12 +18,8 @@ use ratatui::{
 };
 use std::sync::{Arc, Mutex};
 
-const DOWNLOAD_CONTROLS: &[(&str, &str)] = &[
-    ("1", " ALBUMS  "),
-    ("Tab", " ALBUMS  "),
-    ("?", " HELP  "),
-    ("Q", " QUIT"),
-];
+const DOWNLOAD_CONTROLS: &[(&str, &str)] =
+    &[("Tab", " SWITCH  "), ("?", " HELP  "), ("Q", " QUIT")];
 const DOWNLOAD_CONFIRM_CONTROLS: &[(&str, &str)] =
     &[("Y", " ABORT  "), ("N", " CANCEL  "), ("Esc", " CANCEL")];
 
@@ -407,10 +403,7 @@ mod tests {
 
     #[test]
     fn download_controls_follow_confirmation_mode() {
-        assert_eq!(
-            download_controls_text(false),
-            "1 ALBUMS  Tab ALBUMS  ? HELP  Q QUIT"
-        );
+        assert_eq!(download_controls_text(false), "Tab SWITCH  ? HELP  Q QUIT");
         assert_eq!(
             download_controls_text(true),
             "Y ABORT  N CANCEL  Esc CANCEL"

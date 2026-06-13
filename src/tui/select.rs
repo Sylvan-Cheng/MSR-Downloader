@@ -17,13 +17,14 @@ const SELECT_SEARCH_CONTROLS: &[(&str, &str)] = &[
     ("Backspace", " EDIT  "),
     ("Enter", " APPLY  "),
     ("Esc", " CLEAR  "),
+    ("Tab", " SWITCH  "),
     ("?", " HELP  "),
     ("Q", " QUIT"),
 ];
 const SELECT_TRANSFER_CONTROLS: &[(&str, &str)] = &[
     ("↑↓", " MOVE  "),
     ("/", " SEARCH  "),
-    ("Tab", " TRANSFER  "),
+    ("Tab", " SWITCH  "),
     ("?", " HELP  "),
     ("Q", " QUIT"),
 ];
@@ -33,6 +34,7 @@ const SELECT_EMPTY_CONTROLS: &[(&str, &str)] = &[
     ("A", " ALL  "),
     ("/", " SEARCH  "),
     ("Enter", " DOWNLOAD  "),
+    ("Tab", " SWITCH  "),
     ("?", " HELP  "),
     ("Q", " QUIT"),
 ];
@@ -43,6 +45,7 @@ const SELECT_READY_CONTROLS: &[(&str, &str)] = &[
     ("C", " CLEAR  "),
     ("/", " SEARCH  "),
     ("Enter", " DOWNLOAD  "),
+    ("Tab", " SWITCH  "),
     ("?", " HELP  "),
     ("Q", " QUIT"),
 ];
@@ -286,12 +289,14 @@ mod tests {
     fn select_controls_follow_interaction_mode() {
         assert_eq!(
             select_controls_text(true, false, 0),
-            "Type SEARCH  Backspace EDIT  Enter APPLY  Esc CLEAR  ? HELP  Q QUIT"
+            "Type SEARCH  Backspace EDIT  Enter APPLY  Esc CLEAR  Tab SWITCH  ? HELP  Q QUIT"
         );
         assert_eq!(
             select_controls_text(false, true, 2),
-            "↑↓ MOVE  / SEARCH  Tab TRANSFER  ? HELP  Q QUIT"
+            "↑↓ MOVE  / SEARCH  Tab SWITCH  ? HELP  Q QUIT"
         );
+        assert!(select_controls_text(false, false, 0).contains("Tab SWITCH"));
+        assert!(select_controls_text(false, false, 1).contains("Tab SWITCH"));
         assert!(!select_controls_text(false, true, 2).contains("Enter DOWNLOAD"));
         assert!(select_controls_text(false, false, 0).contains("Enter DOWNLOAD"));
         assert!(!select_controls_text(false, false, 0).contains("C CLEAR"));
