@@ -61,9 +61,6 @@ pub struct SongProgress {
     pub attempt: u32,
     pub speed_bps: f64,
     pub last_update: Option<Instant>,
-    pub done: bool,
-    pub skipped: bool,
-    pub failed: bool,
 }
 
 impl SongProgress {
@@ -79,10 +76,22 @@ impl SongProgress {
             attempt: 0,
             speed_bps: 0.0,
             last_update: Some(Instant::now()),
-            done: false,
-            skipped: false,
-            failed: false,
         }
+    }
+
+    pub fn is_done(&self) -> bool {
+        matches!(
+            self.status,
+            SongStatus::Done | SongStatus::Skipped | SongStatus::Failed
+        )
+    }
+
+    pub fn is_skipped(&self) -> bool {
+        self.status == SongStatus::Skipped
+    }
+
+    pub fn is_failed(&self) -> bool {
+        self.status == SongStatus::Failed
     }
 
     fn active_for_plain_output(&self) -> bool {
@@ -148,17 +157,17 @@ impl DownloadProgress {
     }
 
     pub fn failed_count(&self) -> usize {
-        self.tasks.iter().filter(|task| task.failed).count()
+        self.tasks.iter().filter(|task| task.is_failed()).count()
     }
 
     pub fn skipped_count(&self) -> usize {
-        self.tasks.iter().filter(|task| task.skipped).count()
+        self.tasks.iter().filter(|task| task.is_skipped()).count()
     }
 
     pub fn ok_count(&self) -> usize {
         self.tasks
             .iter()
-            .filter(|task| task.done && !task.failed && !task.skipped)
+            .filter(|task| task.status == SongStatus::Done)
             .count()
     }
 
@@ -403,10 +412,7 @@ fn finish_progress(
                 .iter_mut()
                 .find(|task| task.index == current_song)
             {
-                counted = !task.done;
-                task.done = true;
-                task.skipped = skipped;
-                task.failed = failed;
+                counted = !task.is_done();
                 task.status = if failed {
                     SongStatus::Failed
                 } else if skipped {
@@ -861,7 +867,7 @@ fn print_plain_progress(progress: &DownloadProgress) {
     tasks.sort_by_key(|task| task.index);
     let visible_tasks: Vec<_> = tasks
         .iter()
-        .filter(|task| task.done || task.active_for_plain_output())
+        .filter(|task| task.is_done() || task.active_for_plain_output())
         .collect();
     let start = visible_tasks.len().saturating_sub(6);
     for task in &visible_tasks[start..] {

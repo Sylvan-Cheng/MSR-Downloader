@@ -636,7 +636,12 @@ fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
                     .fg(COLOR_ERROR)
                     .add_modifier(Modifier::BOLD),
             )));
-            for task in progress.tasks.iter().filter(|task| task.failed).take(8) {
+            for task in progress
+                .tasks
+                .iter()
+                .filter(|task| task.is_failed())
+                .take(8)
+            {
                 lines.push(Line::from(vec![
                     Span::styled("ERR ", Style::default().fg(COLOR_ERROR)),
                     Span::raw(task.name.clone()),
