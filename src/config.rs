@@ -178,18 +178,51 @@ impl Config {
         if self.download.convert.flac_compression > 8 {
             anyhow::bail!("download.convert.flac_compression must be between 0 and 8");
         }
-        validate_template_component(&self.naming.album_folder, "naming.album_folder")?;
-        validate_template_component(&self.naming.song_file, "naming.song_file")?;
+        validate_template_component(
+            &self.naming.album_folder,
+            "naming.album_folder",
+            &["album_name"],
+        )?;
+        validate_template_component(
+            &self.naming.song_file,
+            "naming.song_file",
+            &["song_name", "ext"],
+        )?;
         Ok(())
     }
 }
 
-fn validate_template_component(value: &str, field: &str) -> anyhow::Result<()> {
+fn validate_template_component(
+    value: &str,
+    field: &str,
+    allowed_placeholders: &[&str],
+) -> anyhow::Result<()> {
     if value.trim().is_empty() {
         anyhow::bail!("{field} cannot be empty");
     }
-    if value.contains('/') || value.contains('\\') || value.trim() == ".." {
-        anyhow::bail!("{field} must not contain path separators or parent directory segments");
+    if value.contains('/')
+        || value.contains('\\')
+        || matches!(value.trim(), "." | "..")
+        || value.trim().ends_with('.')
+    {
+        anyhow::bail!("{field} must be a safe single path component");
+    }
+
+    let mut rest = value;
+    while let Some(start) = rest.find('{') {
+        let after_start = &rest[start + 1..];
+        let Some(end) = after_start.find('}') else {
+            anyhow::bail!("{field} contains an unclosed placeholder");
+        };
+        let placeholder = &after_start[..end];
+        if !allowed_placeholders.contains(&placeholder) {
+            anyhow::bail!("{field} contains unknown placeholder {{{placeholder}}}");
+        }
+        rest = &after_start[end + 1..];
+    }
+
+    if rest.contains('}') {
+        anyhow::bail!("{field} contains an unopened placeholder");
     }
     Ok(())
 }
@@ -258,6 +291,22 @@ wav_to_flac = true
     fn validate_rejects_unsafe_templates() {
         let mut config = Config::default();
         config.naming.song_file = "../{song_name}.{ext}".to_string();
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_unknown_template_placeholders() {
+        let mut config = Config::default();
+        config.naming.song_file = "{artist}-{song_name}.{ext}".to_string();
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_special_path_components() {
+        let mut config = Config::default();
+        config.naming.album_folder = ".".to_string();
 
         assert!(config.validate().is_err());
     }
