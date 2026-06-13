@@ -201,6 +201,12 @@ enum AppScreen {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HelpOverlay {
+    Hidden,
+    Visible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AlbumMouseAction {
     Focus(usize),
     Toggle(usize),
@@ -362,6 +368,7 @@ fn draw_select_screen(
     is_downloading: bool,
     search_query: &str,
     search_active: bool,
+    help_overlay: HelpOverlay,
 ) {
     let chunks = app_chunks(f.area());
 
@@ -382,22 +389,21 @@ fn draw_select_screen(
         .iter()
         .map(|&i| {
             let a = &albums[i];
-            let (checkbox, style) = if i == selected {
-                (
-                    ">",
-                    Style::default()
-                        .fg(COLOR_SECONDARY)
-                        .bg(Color::Rgb(16, 20, 22))
-                        .add_modifier(Modifier::BOLD),
-                )
+            let focus = if i == selected { ">" } else { " " };
+            let checkbox = if selected_albums[i] { "[x]" } else { "[ ]" };
+            let style = if i == selected {
+                Style::default()
+                    .fg(COLOR_SECONDARY)
+                    .bg(Color::Rgb(16, 20, 22))
+                    .add_modifier(Modifier::BOLD)
             } else if selected_albums[i] {
-                ("+", Style::default().fg(COLOR_SUCCESS))
+                Style::default().fg(COLOR_SUCCESS)
             } else {
-                ("-", Style::default().fg(COLOR_MUTED))
+                Style::default().fg(COLOR_MUTED)
             };
 
             ListItem::new(Line::from(vec![Span::styled(
-                format!("{} {}", checkbox, a.name),
+                format!("{} {} {}", focus, checkbox, a.name),
                 style,
             )]))
         })
@@ -448,7 +454,15 @@ fn draw_select_screen(
     // Status bar
     let count = selected_albums.iter().filter(|&&s| s).count();
     let status_text = if search_active {
-        format!("FILTER: {}", search_query)
+        if visible_indices.is_empty() {
+            format!("FILTER: {}_ / NO MATCHES / ESC CLEARS", search_query)
+        } else {
+            format!(
+                "FILTER: {}_ / {} MATCHES",
+                search_query,
+                visible_indices.len()
+            )
+        }
     } else if is_downloading {
         format!("TRANSFER ACTIVE / {} IN QUEUE / TAB TO PROGRESS", count)
     } else if count == 0 {
@@ -478,10 +492,16 @@ fn draw_select_screen(
             Span::raw(" DOWNLOAD  "),
             Span::styled("Tab", Style::default().fg(COLOR_INFO)),
             Span::raw(" PROGRESS  "),
+            Span::styled("?", Style::default().fg(COLOR_INFO)),
+            Span::raw(" HELP  "),
             Span::styled("Q", Style::default().fg(COLOR_INFO)),
             Span::raw(" QUIT"),
         ]),
     );
+
+    if help_overlay == HelpOverlay::Visible {
+        draw_help_overlay(f, chunks[1]);
+    }
 }
 
 fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
@@ -778,6 +798,8 @@ fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
             Span::raw(" TRANSFER  "),
             Span::styled("Tab", Style::default().fg(COLOR_INFO)),
             Span::raw(" SWITCH  "),
+            Span::styled("?", Style::default().fg(COLOR_INFO)),
+            Span::raw(" HELP  "),
             Span::styled("Q", Style::default().fg(COLOR_INFO)),
             Span::raw(if confirm_quit { " ABORT? Y/N" } else { " QUIT" }),
         ]),
@@ -786,6 +808,56 @@ fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
 
 fn is_transfer_idle(done: bool, total_albums: usize, total_songs: usize) -> bool {
     !done && total_albums == 0 && total_songs == 0
+}
+
+fn page_step(area: Rect) -> isize {
+    area.height.saturating_sub(2).max(1) as isize
+}
+
+fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
+    let popup = centered_rect(70, 70, area);
+    let lines = vec![
+        Line::from(Span::styled(
+            "KEYBOARD HELP",
+            Style::default()
+                .fg(COLOR_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::raw("Albums: Up/Down move, PageUp/PageDown jump, Home/End first/last"),
+        Line::raw("Select: Space toggles one album, A toggles filtered albums, C clears queue"),
+        Line::raw("Search: / starts typing, Enter accepts, Esc clears filter"),
+        Line::raw("Transfer: Tab switches screens, Q quits or asks before aborting active work"),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("Esc", Style::default().fg(COLOR_INFO)),
+            Span::raw(" CLOSE HELP"),
+        ]),
+    ];
+    let help = Paragraph::new(lines)
+        .block(create_block("HELP", COLOR_PRIMARY))
+        .wrap(Wrap { trim: true });
+    f.render_widget(help, popup);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1]);
+    horizontal[1]
 }
 
 fn current_transfer_index(
@@ -910,6 +982,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
     let mut selected_albums: Vec<bool> = vec![false; albums.len()];
     let mut search_query = String::new();
     let mut search_active = false;
+    let mut help_overlay = HelpOverlay::Hidden;
     let mut downloaded_names: Vec<String> = Vec::new();
 
     let mut download_queue: Vec<usize> = Vec::new();
@@ -960,15 +1033,22 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                         download_handle.is_some() || transfer_done,
                         &search_query,
                         search_active,
+                        help_overlay,
                     );
                 })?;
 
                 if event::poll(std::time::Duration::from_millis(50))? {
                     match event::read()? {
                         Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                            KeyCode::Esc if help_overlay == HelpOverlay::Visible => {
+                                help_overlay = HelpOverlay::Hidden;
+                            }
                             KeyCode::Esc => {
                                 search_active = false;
                                 search_query.clear();
+                            }
+                            KeyCode::Char('?') => {
+                                help_overlay = HelpOverlay::Visible;
                             }
                             KeyCode::Backspace if search_active => {
                                 search_query.pop();
@@ -996,6 +1076,38 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                             KeyCode::Down => {
                                 move_selection(&mut selected, &visible_indices, 1);
                             }
+                            KeyCode::PageUp => {
+                                if let Ok((width, height)) = terminal_size() {
+                                    let chunks = app_chunks(Rect::new(0, 0, width, height));
+                                    let body = select_body_chunks(chunks[1]);
+                                    move_selection(
+                                        &mut selected,
+                                        &visible_indices,
+                                        -page_step(body[0]),
+                                    );
+                                }
+                            }
+                            KeyCode::PageDown => {
+                                if let Ok((width, height)) = terminal_size() {
+                                    let chunks = app_chunks(Rect::new(0, 0, width, height));
+                                    let body = select_body_chunks(chunks[1]);
+                                    move_selection(
+                                        &mut selected,
+                                        &visible_indices,
+                                        page_step(body[0]),
+                                    );
+                                }
+                            }
+                            KeyCode::Home => {
+                                if let Some(&first) = visible_indices.first() {
+                                    selected = first;
+                                }
+                            }
+                            KeyCode::End => {
+                                if let Some(&last) = visible_indices.last() {
+                                    selected = last;
+                                }
+                            }
                             KeyCode::Char(' ') => {
                                 if !visible_indices.is_empty() && download_handle.is_none() {
                                     selected_albums[selected] = !selected_albums[selected];
@@ -1010,6 +1122,9 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                             }
                             code if is_key(code, 'c') && download_handle.is_none() => {
                                 selected_albums.fill(false);
+                            }
+                            KeyCode::Enter if search_active => {
+                                search_active = false;
                             }
                             KeyCode::Enter if download_handle.is_none() => {
                                 download_queue = selected_albums
@@ -1185,12 +1300,21 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                 confirm_quit,
                             },
                         );
+                        if help_overlay == HelpOverlay::Visible {
+                            draw_help_overlay(f, f.area());
+                        }
                     })?;
                 }
 
                 if event::poll(std::time::Duration::from_millis(80))? {
                     match event::read()? {
                         Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                            KeyCode::Esc if help_overlay == HelpOverlay::Visible => {
+                                help_overlay = HelpOverlay::Hidden;
+                            }
+                            KeyCode::Char('?') => {
+                                help_overlay = HelpOverlay::Visible;
+                            }
                             code if is_key(code, 'q') => {
                                 if download_handle.is_some() && !transfer_done {
                                     confirm_quit = true;
@@ -1422,6 +1546,12 @@ mod tests {
         assert!(!is_transfer_idle(false, 1, 0));
         assert!(!is_transfer_idle(false, 0, 1));
         assert!(!is_transfer_idle(true, 0, 0));
+    }
+
+    #[test]
+    fn page_step_uses_visible_rows() {
+        assert_eq!(page_step(Rect::new(0, 0, 80, 10)), 8);
+        assert_eq!(page_step(Rect::new(0, 0, 80, 1)), 1);
     }
 
     #[test]
