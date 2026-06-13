@@ -258,7 +258,10 @@ impl TuiState {
         }
     }
 
-    fn transfer_active(&self, download_handle: &Option<JoinHandle<anyhow::Result<Vec<String>>>>) -> bool {
+    fn transfer_active(
+        &self,
+        download_handle: &Option<JoinHandle<anyhow::Result<Vec<String>>>>,
+    ) -> bool {
         download_handle.is_some() && !self.transfer_done
     }
 
@@ -275,7 +278,10 @@ impl TuiState {
         self.help_overlay = HelpOverlay::Hidden;
     }
 
-    fn confirm_or_quit(&mut self, download_handle: &Option<JoinHandle<anyhow::Result<Vec<String>>>>) -> bool {
+    fn confirm_or_quit(
+        &mut self,
+        download_handle: &Option<JoinHandle<anyhow::Result<Vec<String>>>>,
+    ) -> bool {
         if self.transfer_active(download_handle) {
             self.confirm_quit = true;
             self.screen = AppScreen::Downloading;
@@ -1035,6 +1041,87 @@ fn album_mouse_action(
     }
 }
 
+fn start_tui_download(
+    api: &ApiClient,
+    config: &Config,
+    albums: &[models::AlbumBrief],
+    state: &mut TuiState,
+    progress: &Arc<Mutex<DownloadProgress>>,
+) -> Option<JoinHandle<anyhow::Result<Vec<String>>>> {
+    state.start_queue();
+    if state.download_queue.is_empty() {
+        return None;
+    }
+
+    *progress.lock().expect("progress lock poisoned") = DownloadProgress::new("Preparing...", 0);
+
+    let api_clone = api.clone();
+    let config_clone = config.clone();
+    let progress_clone = progress.clone();
+    let queued_albums: Vec<_> = state
+        .download_queue
+        .iter()
+        .map(|&idx| (idx, albums[idx].clone()))
+        .collect();
+
+    state.screen = AppScreen::Downloading;
+
+    Some(tokio::spawn(async move {
+        let mut downloaded = Vec::new();
+        let mut failures = Vec::new();
+        for (_, album) in queued_albums {
+            let album_detail = match api_clone.get_album_detail(&album.cid).await {
+                Ok(album_detail) => album_detail,
+                Err(e) => {
+                    let message = format!("Album {} detail error: {}", album.name, e);
+                    if let Ok(mut prog) = progress_clone.lock() {
+                        prog.errors.push(message.clone());
+                    }
+                    failures.push(message);
+                    continue;
+                }
+            };
+
+            if let Ok(mut prog) = progress_clone.lock() {
+                *prog = DownloadProgress::new(&album_detail.name, album_detail.songs.len());
+            }
+
+            downloader::download_album_with_progress(
+                &api_clone,
+                &album_detail,
+                &config_clone,
+                Some(progress_clone.clone()),
+            )
+            .await
+            .map(|_| downloaded.push(album.name.clone()))
+            .unwrap_or_else(|e| {
+                let message = format!("Album {} download error: {}", album.name, e);
+                if let Ok(mut prog) = progress_clone.lock() {
+                    prog.errors.push(message.clone());
+                }
+                failures.push(message);
+            });
+        }
+
+        if !failures.is_empty() {
+            if let Ok(mut prog) = progress_clone.lock() {
+                for failure in &failures {
+                    if !prog.errors.contains(failure) {
+                        prog.errors.push(failure.clone());
+                    }
+                }
+            }
+            anyhow::bail!(
+                "{} album(s) failed: {}",
+                failures.len(),
+                failures.join("; ")
+            );
+        }
+
+        Ok(downloaded)
+    }))
+}
+
 async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
     let albums = api.get_albums().await.map_err(|e| {
         anyhow::anyhow!(
@@ -1168,12 +1255,14 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                             }
                             KeyCode::Char(' ') => {
                                 if !visible_indices.is_empty() && download_handle.is_none() {
-                                    state.selected_albums[state.selected] = !state.selected_albums[state.selected];
+                                    state.selected_albums[state.selected] =
+                                        !state.selected_albums[state.selected];
                                 }
                             }
                             code if is_key(code, 'a') && download_handle.is_none() => {
-                                let all_selected =
-                                    visible_indices.iter().all(|&idx| state.selected_albums[idx]);
+                                let all_selected = visible_indices
+                                    .iter()
+                                    .all(|&idx| state.selected_albums[idx]);
                                 for &idx in &visible_indices {
                                     state.selected_albums[idx] = !all_selected;
                                 }
@@ -1185,84 +1274,8 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                 state.search_active = false;
                             }
                             KeyCode::Enter if download_handle.is_none() => {
-                                state.start_queue();
-
-                                if !state.download_queue.is_empty() {
-                                    *progress.lock().expect("progress lock poisoned") =
-                                        DownloadProgress::new("Preparing...", 0);
-
-                                    let api_clone = api.clone();
-                                    let config_clone = config.clone();
-                                    let progress_clone = progress.clone();
-                                    let queued_albums: Vec<_> = state
-                                        .download_queue
-                                        .iter()
-                                        .map(|&idx| (idx, albums[idx].clone()))
-                                        .collect();
-                                    download_handle = Some(tokio::spawn(async move {
-                                        let mut downloaded = Vec::new();
-                                        let mut failures = Vec::new();
-                                        for (_, album) in queued_albums {
-                                            let album_detail = match api_clone
-                                                .get_album_detail(&album.cid)
-                                                .await
-                                            {
-                                                Ok(album_detail) => album_detail,
-                                                Err(e) => {
-                                                    let message = format!(
-                                                        "Album {} detail error: {}",
-                                                        album.name, e
-                                                    );
-                                                    if let Ok(mut prog) = progress_clone.lock() {
-                                                        prog.errors.push(message.clone());
-                                                    }
-                                                    failures.push(message);
-                                                    continue;
-                                                }
-                                            };
-                                            if let Ok(mut prog) = progress_clone.lock() {
-                                                *prog = DownloadProgress::new(
-                                                    &album_detail.name,
-                                                    album_detail.songs.len(),
-                                                );
-                                            }
-                                            downloader::download_album_with_progress(
-                                                &api_clone,
-                                                &album_detail,
-                                                &config_clone,
-                                                Some(progress_clone.clone()),
-                                            )
-                                            .await
-                                            .map(|_| downloaded.push(album.name.clone()))
-                                            .unwrap_or_else(|e| {
-                                                let message = format!(
-                                                    "Album {} download error: {}",
-                                                    album.name, e
-                                                );
-                                                if let Ok(mut prog) = progress_clone.lock() {
-                                                    prog.errors.push(message.clone());
-                                                }
-                                                failures.push(message);
-                                            });
-                                        }
-                                        if !failures.is_empty() {
-                                            if let Ok(mut prog) = progress_clone.lock() {
-                                                for failure in &failures {
-                                                    if !prog.errors.contains(failure) {
-                                                        prog.errors.push(failure.clone());
-                                                    }
-                                                }
-                                            }
-                                            anyhow::bail!(
-                                                "{} album(s) failed: {}",
-                                                failures.len(),
-                                                failures.join("; ")
-                                            );
-                                        }
-                                        Ok(downloaded)
-                                    }));
-                                    state.screen = AppScreen::Downloading;
-                                }
+                                download_handle =
+                                    start_tui_download(api, config, &albums, &mut state, &progress);
                             }
                             KeyCode::Enter => {}
                             _ => {}
@@ -1296,7 +1309,10 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                     } else {
                                         let body = select_body_chunks(chunks[1]);
                                         if let Some(action) = album_mouse_action(
-                                            selected_visible_position(&visible_indices, state.selected),
+                                            selected_visible_position(
+                                                &visible_indices,
+                                                state.selected,
+                                            ),
                                             visible_indices.len(),
                                             body[0],
                                             mouse.column,
@@ -1370,7 +1386,9 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                 }
                             }
                             code if state.confirm_quit && is_key(code, 'y') => break,
-                            code if state.confirm_quit && (is_key(code, 'n') || code == KeyCode::Esc) => {
+                            code if state.confirm_quit
+                                && (is_key(code, 'n') || code == KeyCode::Esc) =>
+                            {
                                 state.confirm_quit = false;
                             }
                             KeyCode::Char('1') => {
