@@ -781,3 +781,161 @@ fn print_matched_albums(label: &str, albums: &[&crate::models::AlbumBrief]) {
         println!("  {}  {}", album.cid.dimmed(), album.name);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::MusicSource;
+    use crate::models::AlbumBrief;
+    use async_trait::async_trait;
+    use std::collections::HashSet;
+
+    #[derive(Clone, Default)]
+    struct MockSource {
+        albums: Vec<AlbumBrief>,
+        fail_detail_cids: HashSet<String>,
+        detail_calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl MusicSource for MockSource {
+        async fn get_albums(&self) -> anyhow::Result<Vec<AlbumBrief>> {
+            Ok(self.albums.clone())
+        }
+
+        async fn get_album_detail(&self, cid: &str) -> anyhow::Result<AlbumDetail> {
+            self.detail_calls.lock().unwrap().push(cid.to_string());
+            if self.fail_detail_cids.contains(cid) {
+                anyhow::bail!("detail failed for {cid}");
+            }
+
+            Ok(album_detail(cid, &format!("Album {cid}")))
+        }
+
+        async fn get_song(&self, cid: &str) -> anyhow::Result<SongDetail> {
+            Ok(song_detail(cid, &format!("Song {cid}")))
+        }
+
+        async fn download_file(&self, _url: &str, _dest: &Path) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn content_length(&self, _url: &str) -> anyhow::Result<Option<u64>> {
+            Ok(Some(0))
+        }
+
+        async fn download_file_with_progress(
+            &self,
+            _url: &str,
+            _dest: &Path,
+            _on_progress: &mut (dyn FnMut(FileProgress) + Send),
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn download_albums_by_name_errors_when_no_album_matches() {
+        let source = MockSource {
+            albums: vec![album_brief("a", "Alpha")],
+            ..Default::default()
+        };
+
+        let error = download_albums_by_name(
+            &source,
+            &Config::default(),
+            &["missing".to_string()],
+            false,
+            true,
+            crate::cli_progress::CliProgressMode::Summary,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("no albums matched"));
+    }
+
+    #[tokio::test]
+    async fn download_albums_by_id_dry_run_matches_without_fetching_detail() {
+        let source = MockSource {
+            albums: vec![album_brief("a", "Alpha")],
+            ..Default::default()
+        };
+
+        download_albums_by_id(
+            &source,
+            &Config::default(),
+            &["a".to_string()],
+            true,
+            crate::cli_progress::CliProgressMode::Summary,
+        )
+        .await
+        .unwrap();
+
+        assert!(source.detail_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn download_all_continues_after_album_detail_error() {
+        let mut fail_detail_cids = HashSet::new();
+        fail_detail_cids.insert("bad".to_string());
+        let source = MockSource {
+            albums: vec![album_brief("bad", "Bad"), album_brief("ok", "Ok")],
+            fail_detail_cids,
+            ..Default::default()
+        };
+        let mut config = Config::default();
+        config.download.include.album_info = false;
+        config.download.include.covers = false;
+
+        let error = download_all(
+            &source,
+            &config,
+            crate::cli_progress::CliProgressMode::Summary,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("1 album(s) failed"));
+        assert_eq!(
+            *source.detail_calls.lock().unwrap(),
+            vec!["bad".to_string(), "ok".to_string()]
+        );
+    }
+
+    fn album_brief(cid: &str, name: &str) -> AlbumBrief {
+        AlbumBrief {
+            cid: cid.to_string(),
+            name: name.to_string(),
+            cover_url: String::new(),
+            artists: Vec::new(),
+        }
+    }
+
+    fn album_detail(cid: &str, name: &str) -> AlbumDetail {
+        AlbumDetail {
+            cid: cid.to_string(),
+            name: name.to_string(),
+            intro: String::new(),
+            belong: String::new(),
+            cover_url: String::new(),
+            cover_de_url: String::new(),
+            songs: Vec::new(),
+        }
+    }
+
+    fn song_detail(cid: &str, name: &str) -> SongDetail {
+        SongDetail {
+            cid: cid.to_string(),
+            name: name.to_string(),
+            album_cid: "album".to_string(),
+            source_url: "https://example.com/song.wav".to_string(),
+            lyric_url: None,
+            mv_url: None,
+            mv_cover_url: None,
+            artists: Vec::new(),
+        }
+    }
+}
