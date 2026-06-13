@@ -1185,15 +1185,21 @@ pub async fn download_albums_by_name(
     api: &ApiClient,
     config: &Config,
     names: &[String],
+    exact: bool,
+    dry_run: bool,
     progress_mode: CliProgressMode,
 ) -> anyhow::Result<()> {
     let albums = api.get_albums().await?;
     let matched: Vec<_> = albums
         .iter()
         .filter(|a| {
-            names
-                .iter()
-                .any(|n| a.name.to_lowercase().contains(&n.to_lowercase()))
+            names.iter().any(|n| {
+                if exact {
+                    a.name.eq_ignore_ascii_case(n)
+                } else {
+                    a.name.to_lowercase().contains(&n.to_lowercase())
+                }
+            })
         })
         .collect();
 
@@ -1201,11 +1207,11 @@ pub async fn download_albums_by_name(
         anyhow::bail!("no albums matched the given names; use --list to inspect available albums");
     }
 
-    println!(
-        "{} {} MATCHING ALBUMS",
-        "MSR//".cyan().bold(),
-        matched.len()
-    );
+    print_matched_albums("MATCHING", &matched);
+
+    if dry_run {
+        return Ok(());
+    }
 
     let mut failures = Vec::new();
     for album_brief in matched {
@@ -1239,6 +1245,75 @@ pub async fn download_albums_by_name(
     }
 
     Ok(())
+}
+
+pub async fn download_albums_by_id(
+    api: &ApiClient,
+    config: &Config,
+    ids: &[String],
+    dry_run: bool,
+    progress_mode: CliProgressMode,
+) -> anyhow::Result<()> {
+    let albums = api.get_albums().await?;
+    let matched: Vec<_> = albums
+        .iter()
+        .filter(|a| ids.iter().any(|id| a.cid.eq_ignore_ascii_case(id)))
+        .collect();
+
+    if matched.is_empty() {
+        anyhow::bail!("no albums matched the given CIDs; use --list to inspect available albums");
+    }
+
+    print_matched_albums("MATCHING", &matched);
+
+    if dry_run {
+        return Ok(());
+    }
+
+    let mut failures = Vec::new();
+    for album_brief in matched {
+        println!(
+            "\n{} {}",
+            "ALBUM".cyan().bold(),
+            album_brief.name.white().bold()
+        );
+        match api.get_album_detail(&album_brief.cid).await {
+            Ok(album_detail) => {
+                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
+                    let message = format!("{}: {}", album_brief.name, e);
+                    eprintln!("{} {}", "ERR".red().bold(), message.red());
+                    failures.push(message);
+                }
+            }
+            Err(e) => {
+                let message = format!("{}: {}", album_brief.name, e);
+                eprintln!("{} {}", "ERR".red().bold(), message.red());
+                failures.push(message);
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{} album(s) failed: {}",
+            failures.len(),
+            failures.join("; ")
+        );
+    }
+
+    Ok(())
+}
+
+fn print_matched_albums(label: &str, albums: &[&crate::models::AlbumBrief]) {
+    println!(
+        "{} {} {} ALBUMS",
+        "MSR//".cyan().bold(),
+        albums.len(),
+        label
+    );
+    for album in albums {
+        println!("  {}  {}", album.cid.dimmed(), album.name);
+    }
 }
 
 #[cfg(test)]

@@ -29,6 +29,15 @@ msr-downloader --cli --list
 # 下载指定专辑
 msr-downloader --cli --album "相变临界" "Innocence"
 
+# 预览名称匹配结果，不下载
+msr-downloader --cli --album "相变临界" --dry-run
+
+# 精确匹配专辑名
+msr-downloader --cli --album "相变临界" --exact
+
+# 使用 --list 输出的 CID 下载专辑
+msr-downloader --cli --album-id "<cid>"
+
 # 下载全部专辑（必须显式确认）
 msr-downloader --cli --all
 

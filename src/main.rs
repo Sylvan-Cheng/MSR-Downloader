@@ -65,7 +65,7 @@ const COLOR_MUTED: Color = Color::Rgb(92, 98, 100);
     name = "msr-downloader",
     version,
     about = "Monster Siren Music Downloader",
-    after_help = "Examples:\n  msr-downloader\n  msr-downloader --cli --list\n  msr-downloader --cli --album \"相变临界\"\n  msr-downloader --cli --all --output ./music\n  msr-downloader --clean-parts --dry-run\n  msr-downloader --clean-parts --yes"
+    after_help = "Examples:\n  msr-downloader\n  msr-downloader --cli --list\n  msr-downloader --cli --album \"相变临界\"\n  msr-downloader --cli --album \"相变临界\" --exact --dry-run\n  msr-downloader --cli --album-id 123456\n  msr-downloader --cli --all --output ./music\n  msr-downloader --clean-parts --dry-run\n  msr-downloader --clean-parts --yes"
 )]
 struct Cli {
     #[arg(
@@ -84,6 +84,10 @@ struct Cli {
     output: Option<PathBuf>,
     #[arg(short, long, num_args = 1.., value_name = "NAME", help = "Download albums whose names contain the given text")]
     album: Option<Vec<String>>,
+    #[arg(long, num_args = 1.., value_name = "CID", help = "Download albums by exact album CID from --list")]
+    album_id: Option<Vec<String>>,
+    #[arg(long, help = "Require --album to match album names exactly")]
+    exact: bool,
     #[arg(short, long, help = "List available albums and exit")]
     list: bool,
     #[arg(
@@ -103,7 +107,10 @@ struct Cli {
     print_config: bool,
     #[arg(long, help = "Clean .part files from the output directory")]
     clean_parts: bool,
-    #[arg(long, help = "Preview cleanup targets without deleting files")]
+    #[arg(
+        long,
+        help = "Preview cleanup targets or matched downloads without changing files"
+    )]
     dry_run: bool,
     #[arg(long, help = "Confirm destructive cleanup actions")]
     yes: bool,
@@ -1268,7 +1275,11 @@ async fn main() -> anyhow::Result<()> {
 
     let api = ApiClient::new(&config.api)?;
 
-    if !cli.cli && !cli.list && !cli.all && cli.album.is_none() {
+    if cli.album.is_some() && cli.album_id.is_some() {
+        anyhow::bail!("use either --album or --album-id, not both");
+    }
+
+    if !cli.cli && !cli.list && !cli.all && cli.album.is_none() && cli.album_id.is_none() {
         run_tui(&api, &config).await?;
         return Ok(());
     }
@@ -1291,15 +1302,31 @@ async fn main() -> anyhow::Result<()> {
         downloader::CliProgressMode::Auto
     };
 
-    if let Some(names) = cli.album {
-        downloader::download_albums_by_name(&api, &config, &names, cli_progress_mode).await?;
+    let performed_download = if let Some(names) = cli.album {
+        downloader::download_albums_by_name(
+            &api,
+            &config,
+            &names,
+            cli.exact,
+            cli.dry_run,
+            cli_progress_mode,
+        )
+        .await?;
+        !cli.dry_run
+    } else if let Some(ids) = cli.album_id {
+        downloader::download_albums_by_id(&api, &config, &ids, cli.dry_run, cli_progress_mode)
+            .await?;
+        !cli.dry_run
     } else if cli.all {
         downloader::download_all(&api, &config, cli_progress_mode).await?;
+        true
     } else {
         anyhow::bail!("no CLI action selected; use --list, --album <name>, or --all");
-    }
+    };
 
-    println!("\n{}", "MSR// TRANSFER COMPLETE".cyan().bold());
+    if performed_download {
+        println!("\n{}", "MSR// TRANSFER COMPLETE".cyan().bold());
+    }
     Ok(())
 }
 
