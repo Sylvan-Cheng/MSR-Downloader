@@ -8,6 +8,7 @@ mod fs_util;
 mod metadata;
 mod models;
 mod progress;
+mod tui;
 
 use api::ApiClient;
 use clap::Parser;
@@ -25,19 +26,24 @@ use crossterm::{
     },
 };
 use owo_colors::OwoColorize;
-use progress::{DownloadProgress, SongStatus};
+use progress::DownloadProgress;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph, Wrap},
+    widgets::{List, ListItem, ListState, Paragraph, Wrap},
     Terminal,
 };
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
+use tui::chrome::{create_block, draw_app_header, draw_controls_bar, draw_status_bar};
+use tui::theme::{
+    tui_status_style, COLOR_ERROR, COLOR_INFO, COLOR_MUTED, COLOR_PRIMARY, COLOR_SECONDARY,
+    COLOR_SUCCESS, COLOR_WARNING,
+};
 
 struct TerminalGuard;
 
@@ -56,14 +62,6 @@ impl Drop for TerminalGuard {
 fn is_key(code: KeyCode, expected: char) -> bool {
     matches!(code, KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&expected))
 }
-
-const COLOR_PRIMARY: Color = Color::Rgb(0, 216, 198);
-const COLOR_SECONDARY: Color = Color::Rgb(214, 218, 216);
-const COLOR_SUCCESS: Color = Color::Rgb(0, 216, 198);
-const COLOR_WARNING: Color = Color::Rgb(214, 218, 216);
-const COLOR_ERROR: Color = Color::Rgb(238, 89, 82);
-const COLOR_INFO: Color = Color::Rgb(0, 216, 198);
-const COLOR_MUTED: Color = Color::Rgb(92, 98, 100);
 
 #[derive(Parser)]
 #[command(
@@ -424,86 +422,6 @@ fn move_selection(selected: &mut usize, visible_indices: &[usize], delta: isize)
         (current + delta as usize).min(visible_indices.len() - 1)
     };
     *selected = visible_indices[next];
-}
-
-fn create_block(title: &str, border_color: Color) -> Block<'_> {
-    Block::default()
-        .title(format!(" {} ", title.to_ascii_uppercase()))
-        .title_style(
-            Style::default()
-                .fg(COLOR_SECONDARY)
-                .add_modifier(Modifier::BOLD),
-        )
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
-        .padding(Padding::horizontal(1))
-}
-
-fn tui_status_style(status: SongStatus) -> Style {
-    match status {
-        SongStatus::Failed => Style::default()
-            .fg(COLOR_ERROR)
-            .add_modifier(Modifier::BOLD),
-        SongStatus::Skipped => Style::default()
-            .fg(COLOR_WARNING)
-            .add_modifier(Modifier::BOLD),
-        SongStatus::Done | SongStatus::Resuming => Style::default()
-            .fg(COLOR_SUCCESS)
-            .add_modifier(Modifier::BOLD),
-        SongStatus::Checking | SongStatus::Tagging => Style::default()
-            .fg(COLOR_SECONDARY)
-            .add_modifier(Modifier::BOLD),
-        SongStatus::Queued => Style::default().fg(COLOR_MUTED),
-        SongStatus::Getting => Style::default().fg(COLOR_INFO).add_modifier(Modifier::BOLD),
-    }
-}
-
-fn tab_span(label: &'static str, active: bool) -> Span<'static> {
-    if active {
-        Span::styled(
-            label,
-            Style::default()
-                .fg(COLOR_PRIMARY)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled(label, Style::default().fg(COLOR_MUTED))
-    }
-}
-
-fn draw_app_header(
-    f: &mut ratatui::Frame,
-    area: ratatui::layout::Rect,
-    screen: AppScreen,
-    title_text: String,
-    title_color: Color,
-) {
-    let title = Paragraph::new(Line::from(vec![
-        tab_span("ALBUMS [1]", screen == AppScreen::Select),
-        Span::raw("    "),
-        tab_span("TRANSFER [2]", screen == AppScreen::Downloading),
-        Span::raw("    "),
-        Span::styled(
-            title_text,
-            Style::default()
-                .fg(title_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]))
-    .block(create_block("MONSTER SIREN RECORDS", title_color));
-    f.render_widget(title, area);
-}
-
-fn draw_status_bar(f: &mut ratatui::Frame, area: ratatui::layout::Rect, text: String) {
-    let status = Paragraph::new(text)
-        .style(Style::default().fg(COLOR_MUTED))
-        .block(create_block("STATUS", COLOR_MUTED));
-    f.render_widget(status, area);
-}
-
-fn draw_controls_bar(f: &mut ratatui::Frame, area: ratatui::layout::Rect, line: Line<'static>) {
-    let controls = Paragraph::new(line).block(create_block("CONTROLS", COLOR_MUTED));
-    f.render_widget(controls, area);
 }
 
 fn draw_select_screen(
