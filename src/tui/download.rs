@@ -85,13 +85,16 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
         .enumerate()
         .filter(|(idx, _)| !is_idle && (selected_albums[*idx] || *idx == current_album_idx))
         .map(|(i, a)| {
+            let incomplete = done && (progress.failed_count() > 0 || !progress.errors.is_empty());
             let queue_pos = current.saturating_sub(1);
             let album_pos = selected_albums[..i]
                 .iter()
                 .filter(|&&selected| selected)
                 .count();
-            let is_completed = done || album_pos < queue_pos;
-            let (marker, style) = if is_completed {
+            let is_completed = !incomplete && (done || album_pos < queue_pos);
+            let (marker, style) = if incomplete {
+                ("...", Style::default().fg(COLOR_MUTED).add_modifier(Modifier::DIM))
+            } else if is_completed {
                 (
                     "OK ",
                     Style::default().fg(COLOR_MUTED).add_modifier(Modifier::DIM),

@@ -139,7 +139,7 @@ where
         let elapsed = now.duration_since(last_update).as_millis();
         let bytes_since = downloaded.saturating_sub(last_downloaded);
 
-        if elapsed >= 500 || bytes_since >= 1024 * 1024 {
+        if elapsed >= 500 || bytes_since >= 1024 * 1024 || last_downloaded == resume_from {
             on_progress(FileProgress {
                 downloaded,
                 total: total_size,

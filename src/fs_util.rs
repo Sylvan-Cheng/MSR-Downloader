@@ -82,7 +82,7 @@ pub(crate) fn validate_song_destinations(
             );
         }
 
-        let final_path = converted_flac_path(config, &download_path, song).unwrap_or(download_path);
+        let final_path = final_song_path(config, album_path, song)?;
         if !seen_final_paths.insert(final_path.clone()) {
             anyhow::bail!(
                 "duplicate final output path for song {}: {}",

@@ -159,11 +159,29 @@ impl DownloadProgress {
             let task = &mut self.tasks[position];
             task.name = name.to_string();
             task.status = status;
-            task.last_update = Some(Instant::now());
             return task;
         }
 
         self.tasks.push(SongProgress::new(index, name, status));
         self.tasks.last_mut().expect("task inserted")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn task_mut_or_insert_preserves_last_update_for_existing_task() {
+        let mut progress = DownloadProgress::new("album", 1);
+        let original_update = Instant::now() - Duration::from_secs(1);
+        let task = progress.task_mut_or_insert(1, "song", SongStatus::Queued);
+        task.last_update = Some(original_update);
+
+        let task = progress.task_mut_or_insert(1, "song", SongStatus::Getting);
+
+        assert_eq!(task.last_update, Some(original_update));
+        assert_eq!(task.status, SongStatus::Getting);
     }
 }
