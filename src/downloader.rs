@@ -520,12 +520,21 @@ async fn download_song_with_progress(api: &ApiClient, job: SongDownloadJob) -> a
     } = job;
 
     let dest = build_song_path(&config, &album_path, &song)?;
+    let existing_converted_dest = existing_converted_dest(&config, &dest, &song);
 
-    let downloaded = download_audio_file(api, &song, &dest, current, total, &progress).await?;
+    let downloaded = if let Some(final_dest) = existing_converted_dest.as_deref() {
+        skip_existing_converted_file(final_dest, &song, current, &progress);
+        false
+    } else {
+        download_audio_file(api, &song, &dest, current, total, &progress).await?
+    };
 
     let lyrics_text = download_lyrics(api, &config, &album_path, &song).await?;
 
-    let final_dest = convert_if_needed(&config, &dest, &song)?;
+    let final_dest = match existing_converted_dest {
+        Some(path) => path,
+        None => convert_if_needed(&config, &dest, &song)?,
+    };
 
     if downloaded {
         set_progress_status(&progress, current, &song.name, SongStatus::Tagging);
@@ -559,6 +568,44 @@ fn build_song_path(config: &Config, path: &Path, song: &SongDetail) -> anyhow::R
         .replace("{ext}", &ext);
 
     safe_join_child(path, &filename)
+}
+
+fn existing_converted_dest(config: &Config, dest: &Path, song: &SongDetail) -> Option<PathBuf> {
+    if !config.download.convert.enabled || !config.download.convert.wav_to_flac {
+        return None;
+    }
+
+    if ext_from_url(&song.source_url).eq_ignore_ascii_case("wav") {
+        let flac_path = dest.with_extension("flac");
+        flac_path.exists().then_some(flac_path)
+    } else {
+        None
+    }
+}
+
+fn skip_existing_converted_file(
+    final_dest: &Path,
+    song: &SongDetail,
+    current: usize,
+    progress: &Option<Arc<Mutex<DownloadProgress>>>,
+) {
+    let size = final_dest
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(1);
+    update_progress(
+        progress,
+        current,
+        &song.name,
+        FileProgress {
+            downloaded: size,
+            total: size,
+            resumed: false,
+            resume_from: 0,
+            attempt: 0,
+        },
+    );
+    finish_progress(progress, current, true, false);
 }
 
 fn safe_join_child(base: &Path, child: &str) -> anyhow::Result<PathBuf> {
@@ -965,7 +1012,17 @@ async fn download_lyrics(
     }
 
     if lyric_dest.exists() {
-        Ok(Some(std::fs::read_to_string(&lyric_dest)?))
+        match std::fs::read_to_string(&lyric_dest) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) => {
+                eprintln!(
+                    "  {} {}",
+                    "⚠".yellow().bold(),
+                    format!("Could not read lyrics for {}: {}", song.name, e).yellow()
+                );
+                Ok(None)
+            }
+        }
     } else {
         Ok(None)
     }
@@ -1229,12 +1286,47 @@ mod tests {
         assert!(validate_song_destinations(&config, Path::new("album"), &songs).is_err());
     }
 
+    #[test]
+    fn existing_converted_dest_requires_enabled_existing_wav_conversion() {
+        let root = std::env::temp_dir().join(format!(
+            "msr-downloader-flac-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let wav_path = root.join("song.wav");
+        let flac_path = root.join("song.flac");
+        std::fs::write(&flac_path, b"flac").unwrap();
+
+        let mut config = Config::default();
+        let song = song_detail("1", "song");
+        assert!(existing_converted_dest(&config, &wav_path, &song).is_none());
+
+        config.download.convert.enabled = true;
+        config.download.convert.wav_to_flac = true;
+        assert_eq!(
+            existing_converted_dest(&config, &wav_path, &song),
+            Some(flac_path)
+        );
+
+        let mp3_song = SongDetail {
+            source_url: "https://example.com/song.mp3".to_string(),
+            ..song_detail("2", "song")
+        };
+        assert!(existing_converted_dest(&config, &wav_path, &mp3_song).is_none());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn song_detail(cid: &str, name: &str) -> SongDetail {
         SongDetail {
             cid: cid.to_string(),
             name: name.to_string(),
             album_cid: "album".to_string(),
-            source_url: "https://example.com/song.mp3".to_string(),
+            source_url: "https://example.com/song.wav".to_string(),
             lyric_url: None,
             mv_url: None,
             mv_cover_url: None,
