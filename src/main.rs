@@ -890,7 +890,13 @@ fn album_mouse_action(
 }
 
 async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
-    let albums = api.get_albums().await?;
+    let albums = api.get_albums().await.map_err(|e| {
+        anyhow::anyhow!(
+            "could not load albums from {}; check network, API base URL, or run --print-config: {}",
+            config.api.base_url,
+            e
+        )
+    })?;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1280,6 +1286,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if !cli.cli && !cli.list && !cli.all && cli.album.is_none() && cli.album_id.is_none() {
+        println!(
+            "{} CONNECTING TO MONSTER SIREN / {}",
+            "MSR//".cyan().bold(),
+            config.api.base_url
+        );
         run_tui(&api, &config).await?;
         return Ok(());
     }

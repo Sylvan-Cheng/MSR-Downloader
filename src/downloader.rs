@@ -191,7 +191,7 @@ pub async fn download_album_with_progress(
     }
 
     let cover_data = if config.download.include.covers {
-        download_covers(api, &album_path, album).await?
+        download_covers(api, &album_path, album, &progress).await?
     } else {
         None
     };
@@ -472,6 +472,7 @@ async fn download_covers(
     api: &ApiClient,
     path: &Path,
     album: &AlbumDetail,
+    progress: &Option<Arc<Mutex<DownloadProgress>>>,
 ) -> anyhow::Result<Option<Vec<u8>>> {
     let album_name = sanitize(&album.name);
     let mut cover_data: Option<Vec<u8>> = None;
@@ -480,11 +481,8 @@ async fn download_covers(
     let dest = safe_join_child(path, &format!("{}_Cover.{}", album_name, ext))?;
     if !dest.exists() {
         if let Err(e) = api.download_file(&album.cover_url, &dest).await {
-            eprintln!(
-                "  {} {}",
-                "✗".red().bold(),
-                format!("Failed to download cover: {}", e).red()
-            );
+            let message = format!("Failed to download cover for {}: {}", album.name, e);
+            push_error(progress, message);
         }
     }
 
@@ -496,11 +494,11 @@ async fn download_covers(
     let dest = safe_join_child(path, &format!("{}_CoverDe.{}", album_name, ext))?;
     if !dest.exists() {
         if let Err(e) = api.download_file(&album.cover_de_url, &dest).await {
-            eprintln!(
-                "  {} {}",
-                "✗".red().bold(),
-                format!("Failed to download cover: {}", e).red()
+            let message = format!(
+                "Failed to download alternate cover for {}: {}",
+                album.name, e
             );
+            push_error(progress, message);
         }
     }
 
@@ -529,11 +527,11 @@ async fn download_song_with_progress(api: &ApiClient, job: SongDownloadJob) -> a
         download_audio_file(api, &song, &dest, current, total, &progress).await?
     };
 
-    let lyrics_text = download_lyrics(api, &config, &album_path, &song).await?;
+    let lyrics_text = download_lyrics(api, &config, &album_path, &song, &progress).await?;
 
     let final_dest = match existing_converted_dest {
         Some(path) => path,
-        None => convert_if_needed(&config, &dest, &song)?,
+        None => convert_if_needed(&config, &dest, &song, &progress)?,
     };
 
     if downloaded {
@@ -548,6 +546,7 @@ async fn download_song_with_progress(api: &ApiClient, job: SongDownloadJob) -> a
         cover_data.as_deref(),
         lyrics_text,
         downloaded,
+        &progress,
     )?;
 
     if downloaded {
@@ -986,6 +985,7 @@ async fn download_lyrics(
     config: &Config,
     path: &Path,
     song: &SongDetail,
+    progress: &Option<Arc<Mutex<DownloadProgress>>>,
 ) -> anyhow::Result<Option<String>> {
     if !config.download.include.lyrics {
         return Ok(None);
@@ -1002,11 +1002,8 @@ async fn download_lyrics(
 
     if !lyric_dest.exists() {
         if let Err(e) = api.download_file(lyric_url, &lyric_dest).await {
-            eprintln!(
-                "  {} {}",
-                "✗".red().bold(),
-                format!("Failed to download lyrics for {}: {}", song.name, e).red()
-            );
+            let message = format!("Failed to download lyrics for {}: {}", song.name, e);
+            push_error(progress, message.clone());
             return Ok(None);
         }
     }
@@ -1015,11 +1012,8 @@ async fn download_lyrics(
         match std::fs::read_to_string(&lyric_dest) {
             Ok(text) => Ok(Some(text)),
             Err(e) => {
-                eprintln!(
-                    "  {} {}",
-                    "⚠".yellow().bold(),
-                    format!("Could not read lyrics for {}: {}", song.name, e).yellow()
-                );
+                let message = format!("Could not read lyrics for {}: {}", song.name, e);
+                push_error(progress, message.clone());
                 Ok(None)
             }
         }
@@ -1028,7 +1022,12 @@ async fn download_lyrics(
     }
 }
 
-fn convert_if_needed(config: &Config, dest: &Path, song: &SongDetail) -> anyhow::Result<PathBuf> {
+fn convert_if_needed(
+    config: &Config,
+    dest: &Path,
+    song: &SongDetail,
+    progress: &Option<Arc<Mutex<DownloadProgress>>>,
+) -> anyhow::Result<PathBuf> {
     if !config.download.convert.enabled || !config.download.convert.wav_to_flac || !dest.exists() {
         return Ok(dest.to_path_buf());
     }
@@ -1046,11 +1045,13 @@ fn convert_if_needed(config: &Config, dest: &Path, song: &SongDetail) -> anyhow:
     match metadata::convert_wav_to_flac(dest, &flac_path, config.download.convert.flac_compression)
     {
         Ok(_) => {
-            eprintln!(
-                "  {} {}",
-                "✓".green().bold(),
-                format!("Converted to FLAC: {}", sanitize(&song.name)).green()
-            );
+            if progress.is_none() {
+                eprintln!(
+                    "  {} {}",
+                    "✓".green().bold(),
+                    format!("Converted to FLAC: {}", sanitize(&song.name)).green()
+                );
+            }
 
             if config.download.convert.delete_original {
                 std::fs::remove_file(dest)?;
@@ -1058,11 +1059,8 @@ fn convert_if_needed(config: &Config, dest: &Path, song: &SongDetail) -> anyhow:
             Ok(flac_path)
         }
         Err(e) => {
-            eprintln!(
-                "  {} {}",
-                "⚠".yellow().bold(),
-                format!("Failed to convert to FLAC: {}", e).yellow()
-            );
+            let message = format!("Failed to convert {} to FLAC: {}", song.name, e);
+            push_error(progress, message);
             Ok(dest.to_path_buf())
         }
     }
@@ -1076,6 +1074,7 @@ fn write_metadata_if_needed(
     cover_data: Option<&[u8]>,
     lyrics_text: Option<String>,
     downloaded: bool,
+    progress: &Option<Arc<Mutex<DownloadProgress>>>,
 ) -> anyhow::Result<()> {
     if !config.download.include.metadata || (!downloaded && dest.exists()) {
         return Ok(());
@@ -1103,11 +1102,8 @@ fn write_metadata_if_needed(
         cover_data,
         lyrics_text.as_deref(),
     ) {
-        eprintln!(
-            "  {} {}",
-            "⚠".yellow().bold(),
-            format!("Failed to write metadata: {}", e).yellow()
-        );
+        let message = format!("Failed to write metadata for {}: {}", song.name, e);
+        push_error(progress, message);
     }
 
     Ok(())
