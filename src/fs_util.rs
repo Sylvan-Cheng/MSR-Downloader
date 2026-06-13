@@ -56,23 +56,52 @@ pub(crate) fn build_song_path(
     safe_join_child(path, &filename)
 }
 
+pub(crate) fn final_song_path(
+    config: &Config,
+    path: &Path,
+    song: &SongDetail,
+) -> anyhow::Result<PathBuf> {
+    let dest = build_song_path(config, path, song)?;
+    Ok(converted_flac_path(config, &dest, song).unwrap_or(dest))
+}
+
 pub(crate) fn validate_song_destinations(
     config: &Config,
     album_path: &Path,
     songs: &[(usize, SongDetail)],
 ) -> anyhow::Result<()> {
-    let mut seen = HashSet::new();
+    let mut seen_download_paths = HashSet::new();
+    let mut seen_final_paths = HashSet::new();
     for (_, song) in songs {
-        let path = build_song_path(config, album_path, song)?;
-        if !seen.insert(path.clone()) {
+        let download_path = build_song_path(config, album_path, song)?;
+        if !seen_download_paths.insert(download_path.clone()) {
             anyhow::bail!(
-                "duplicate output path for song {}: {}",
+                "duplicate download path for song {}: {}",
                 song.name,
-                path.display()
+                download_path.display()
+            );
+        }
+
+        let final_path = converted_flac_path(config, &download_path, song).unwrap_or(download_path);
+        if !seen_final_paths.insert(final_path.clone()) {
+            anyhow::bail!(
+                "duplicate final output path for song {}: {}",
+                song.name,
+                final_path.display()
             );
         }
     }
     Ok(())
+}
+
+fn converted_flac_path(config: &Config, dest: &Path, song: &SongDetail) -> Option<PathBuf> {
+    if !config.download.convert.enabled || !config.download.convert.wav_to_flac {
+        return None;
+    }
+
+    ext_from_url(&song.source_url)
+        .eq_ignore_ascii_case("wav")
+        .then(|| dest.with_extension("flac"))
 }
 
 pub(crate) fn existing_converted_dest(
@@ -80,16 +109,13 @@ pub(crate) fn existing_converted_dest(
     dest: &Path,
     song: &SongDetail,
 ) -> Option<PathBuf> {
-    if !config.download.convert.enabled || !config.download.convert.wav_to_flac {
-        return None;
-    }
+    converted_flac_path(config, dest, song).filter(|path| file_is_nonempty(path))
+}
 
-    if ext_from_url(&song.source_url).eq_ignore_ascii_case("wav") {
-        let flac_path = dest.with_extension("flac");
-        flac_path.exists().then_some(flac_path)
-    } else {
-        None
-    }
+fn file_is_nonempty(path: &Path) -> bool {
+    path.metadata()
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -144,6 +170,24 @@ mod tests {
     }
 
     #[test]
+    fn validate_song_destinations_rejects_converted_flac_collision() {
+        let mut config = Config::default();
+        config.download.convert.enabled = true;
+        config.download.convert.wav_to_flac = true;
+        let native_flac = SongDetail {
+            source_url: "https://example.com/same.flac".to_string(),
+            ..song_detail("2", "same")
+        };
+        let songs = vec![(0, song_detail("1", "same")), (1, native_flac)];
+
+        let error = validate_song_destinations(&config, Path::new("album"), &songs)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("duplicate final output path"));
+    }
+
+    #[test]
     fn existing_converted_dest_requires_enabled_existing_wav_conversion() {
         let root = std::env::temp_dir().join(format!(
             "msr-downloader-flac-test-{}-{}",
@@ -174,6 +218,28 @@ mod tests {
             ..song_detail("2", "song")
         };
         assert!(existing_converted_dest(&config, &wav_path, &mp3_song).is_none());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn existing_converted_dest_ignores_empty_flac() {
+        let root = std::env::temp_dir().join(format!(
+            "msr-downloader-empty-flac-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let wav_path = root.join("song.wav");
+        std::fs::write(root.join("song.flac"), b"").unwrap();
+
+        let mut config = Config::default();
+        config.download.convert.enabled = true;
+        config.download.convert.wav_to_flac = true;
+        assert!(existing_converted_dest(&config, &wav_path, &song_detail("1", "song")).is_none());
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -242,6 +308,18 @@ mod tests {
         ];
 
         assert!(validate_song_destinations(&config, Path::new("album"), &songs).is_ok());
+    }
+
+    #[test]
+    fn final_song_path_reflects_wav_to_flac_conversion() {
+        let mut config = Config::default();
+        config.download.convert.enabled = true;
+        config.download.convert.wav_to_flac = true;
+
+        assert_eq!(
+            final_song_path(&config, Path::new("album"), &song_detail("1", "song")).unwrap(),
+            Path::new("album").join("song.flac")
+        );
     }
 
     fn song_detail(cid: &str, name: &str) -> SongDetail {

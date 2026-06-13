@@ -532,8 +532,11 @@ fn convert_if_needed(
     }
 
     let flac_path = dest.with_extension("flac");
-    if flac_path.exists() {
+    if fs_util::existing_converted_dest(config, dest, song).is_some() {
         return Ok(flac_path);
+    }
+    if flac_path.exists() {
+        let _ = std::fs::remove_file(&flac_path);
     }
 
     match metadata::convert_wav_to_flac(dest, &flac_path, config.download.convert.flac_compression)
