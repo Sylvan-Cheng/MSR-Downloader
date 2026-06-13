@@ -40,6 +40,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 use tui::chrome::{create_block, draw_app_header, draw_controls_bar, draw_status_bar};
+use tui::layout::{app_chunks, contains_point, page_step, select_body_chunks};
+use tui::overlay::draw_help_overlay;
 use tui::theme::{
     tui_status_style, COLOR_ERROR, COLOR_INFO, COLOR_MUTED, COLOR_PRIMARY, COLOR_SECONDARY,
     COLOR_SUCCESS, COLOR_WARNING,
@@ -879,56 +881,6 @@ fn is_transfer_idle(done: bool, total_albums: usize, total_songs: usize) -> bool
     !done && total_albums == 0 && total_songs == 0
 }
 
-fn page_step(area: Rect) -> isize {
-    area.height.saturating_sub(2).max(1) as isize
-}
-
-fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
-    let popup = centered_rect(70, 70, area);
-    let lines = vec![
-        Line::from(Span::styled(
-            "KEYBOARD HELP",
-            Style::default()
-                .fg(COLOR_PRIMARY)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::raw(""),
-        Line::raw("Albums: Up/Down move, PageUp/PageDown jump, Home/End first/last"),
-        Line::raw("Select: Space toggles one album, A toggles filtered albums, C clears queue"),
-        Line::raw("Search: / starts typing, Enter accepts, Esc clears filter"),
-        Line::raw("Transfer: Tab switches screens, Q quits or asks before aborting active work"),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("Esc", Style::default().fg(COLOR_INFO)),
-            Span::raw(" CLOSE HELP"),
-        ]),
-    ];
-    let help = Paragraph::new(lines)
-        .block(create_block("HELP", COLOR_PRIMARY))
-        .wrap(Wrap { trim: true });
-    f.render_widget(help, popup);
-}
-
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-    let horizontal = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1]);
-    horizontal[1]
-}
-
 fn current_transfer_index(
     download_queue: &[usize],
     albums: &[models::AlbumBrief],
@@ -940,32 +892,6 @@ fn current_transfer_index(
         .enumerate()
         .find(|(_, album_idx)| albums[**album_idx].name == album_name)
         .map(|(queue_idx, album_idx)| (queue_idx, *album_idx))
-}
-
-fn app_chunks(area: Rect) -> std::rc::Rc<[Rect]> {
-    Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(3),
-            Constraint::Length(3),
-        ])
-        .split(area)
-}
-
-fn select_body_chunks(area: Rect) -> std::rc::Rc<[Rect]> {
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
-        .split(area)
-}
-
-fn contains_point(rect: Rect, x: u16, y: u16) -> bool {
-    x >= rect.x
-        && x < rect.x.saturating_add(rect.width)
-        && y >= rect.y
-        && y < rect.y.saturating_add(rect.height)
 }
 
 fn screen_from_header_click(header: Rect, x: u16, y: u16) -> Option<AppScreen> {
