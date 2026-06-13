@@ -1741,4 +1741,56 @@ mod tests {
         assert!(state.confirm_or_quit(&handle));
         assert!(!state.confirm_quit);
     }
+
+    #[test]
+    fn cli_requires_explicit_action_in_cli_mode() {
+        let cli = Cli::try_parse_from(["msr-downloader", "--cli"]).unwrap();
+        assert!(cli.cli);
+        assert!(cli.album.is_none());
+        assert!(cli.album_id.is_none());
+        assert!(!cli.all);
+        assert!(!cli.list);
+    }
+
+    #[test]
+    fn cli_all_flag_parses() {
+        let cli = Cli::try_parse_from(["msr-downloader", "--cli", "--all"]).unwrap();
+        assert!(cli.cli);
+        assert!(cli.all);
+    }
+
+    #[test]
+    fn cli_album_and_album_id_conflict() {
+        let cli = Cli::try_parse_from([
+            "msr-downloader",
+            "--cli",
+            "--album",
+            "test",
+            "--album-id",
+            "123",
+        ])
+        .unwrap();
+        assert!(cli.album.is_some());
+        assert!(cli.album_id.is_some());
+    }
+
+    #[test]
+    fn cli_dry_run_flag_parses() {
+        let cli = Cli::try_parse_from(["msr-downloader", "--cli", "--album", "test", "--dry-run"])
+            .unwrap();
+        assert!(cli.dry_run);
+    }
+
+    #[test]
+    fn cli_clean_parts_requires_yes() {
+        let cli = Cli::try_parse_from(["msr-downloader", "--clean-parts"]).unwrap();
+        assert!(cli.clean_parts);
+        assert!(!cli.yes);
+    }
+
+    #[test]
+    fn cli_print_config_flag_parses() {
+        let cli = Cli::try_parse_from(["msr-downloader", "--print-config"]).unwrap();
+        assert!(cli.print_config);
+    }
 }
