@@ -470,12 +470,14 @@ async fn download_covers(
 
     let ext = ext_from_url(&album.cover_url);
     let dest = safe_join_child(path, &format!("{}_Cover.{}", album_name, ext))?;
-    if !dest.exists() {
-        if let Err(e) = api.download_file(&album.cover_url, &dest).await {
-            let message = format!("Failed to download cover for {}: {}", album.name, e);
-            push_error(progress, message);
-        }
-    }
+    download_optional_file(
+        api,
+        &album.cover_url,
+        &dest,
+        format!("Failed to download cover for {}", album.name),
+        progress,
+    )
+    .await;
 
     if dest.exists() {
         cover_data = Some(std::fs::read(&dest)?);
@@ -483,17 +485,32 @@ async fn download_covers(
 
     let ext = ext_from_url(&album.cover_de_url);
     let dest = safe_join_child(path, &format!("{}_CoverDe.{}", album_name, ext))?;
-    if !dest.exists() {
-        if let Err(e) = api.download_file(&album.cover_de_url, &dest).await {
-            let message = format!(
-                "Failed to download alternate cover for {}: {}",
-                album.name, e
-            );
-            push_error(progress, message);
-        }
-    }
+    download_optional_file(
+        api,
+        &album.cover_de_url,
+        &dest,
+        format!("Failed to download alternate cover for {}", album.name),
+        progress,
+    )
+    .await;
 
     Ok(cover_data)
+}
+
+async fn download_optional_file(
+    api: &ApiClient,
+    url: &str,
+    dest: &Path,
+    context: String,
+    progress: &Option<Arc<Mutex<DownloadProgress>>>,
+) {
+    if dest.exists() {
+        return;
+    }
+
+    if let Err(e) = api.download_file(url, dest).await {
+        push_error(progress, format!("{}: {}", context, e));
+    }
 }
 
 async fn download_song_with_progress(api: &ApiClient, job: SongDownloadJob) -> anyhow::Result<()> {
@@ -962,13 +979,14 @@ async fn download_lyrics(
     let lyric_ext = ext_from_url(lyric_url);
     let lyric_dest = safe_join_child(path, &format!("{}.{}", song_name, lyric_ext))?;
 
-    if !lyric_dest.exists() {
-        if let Err(e) = api.download_file(lyric_url, &lyric_dest).await {
-            let message = format!("Failed to download lyrics for {}: {}", song.name, e);
-            push_error(progress, message.clone());
-            return Ok(None);
-        }
-    }
+    download_optional_file(
+        api,
+        lyric_url,
+        &lyric_dest,
+        format!("Failed to download lyrics for {}", song.name),
+        progress,
+    )
+    .await;
 
     if lyric_dest.exists() {
         match std::fs::read_to_string(&lyric_dest) {
