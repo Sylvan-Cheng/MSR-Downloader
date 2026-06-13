@@ -1,6 +1,7 @@
 use crate::config::ApiConfig;
 use crate::models::{AlbumBrief, AlbumDetail, ApiResponse, SongDetail};
 use anyhow::Context;
+use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::{
     header::{ACCEPT_ENCODING, CONTENT_RANGE, RANGE},
@@ -23,6 +24,53 @@ pub struct FileProgress {
 pub struct ApiClient {
     client: Client,
     base_url: String,
+}
+
+#[async_trait]
+pub trait MusicSource: Clone + Send + Sync + 'static {
+    async fn get_albums(&self) -> anyhow::Result<Vec<AlbumBrief>>;
+    async fn get_album_detail(&self, cid: &str) -> anyhow::Result<AlbumDetail>;
+    async fn get_song(&self, cid: &str) -> anyhow::Result<SongDetail>;
+    async fn download_file(&self, url: &str, dest: &Path) -> anyhow::Result<()>;
+    async fn content_length(&self, url: &str) -> anyhow::Result<Option<u64>>;
+    async fn download_file_with_progress(
+        &self,
+        url: &str,
+        dest: &Path,
+        on_progress: &mut (dyn FnMut(FileProgress) + Send),
+    ) -> anyhow::Result<()>;
+}
+
+#[async_trait]
+impl MusicSource for ApiClient {
+    async fn get_albums(&self) -> anyhow::Result<Vec<AlbumBrief>> {
+        ApiClient::get_albums(self).await
+    }
+
+    async fn get_album_detail(&self, cid: &str) -> anyhow::Result<AlbumDetail> {
+        ApiClient::get_album_detail(self, cid).await
+    }
+
+    async fn get_song(&self, cid: &str) -> anyhow::Result<SongDetail> {
+        ApiClient::get_song(self, cid).await
+    }
+
+    async fn download_file(&self, url: &str, dest: &Path) -> anyhow::Result<()> {
+        ApiClient::download_file(self, url, dest).await
+    }
+
+    async fn content_length(&self, url: &str) -> anyhow::Result<Option<u64>> {
+        ApiClient::content_length(self, url).await
+    }
+
+    async fn download_file_with_progress(
+        &self,
+        url: &str,
+        dest: &Path,
+        on_progress: &mut (dyn FnMut(FileProgress) + Send),
+    ) -> anyhow::Result<()> {
+        ApiClient::download_file_with_progress(self, url, dest, on_progress).await
+    }
 }
 
 impl ApiClient {

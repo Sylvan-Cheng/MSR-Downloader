@@ -1,4 +1,4 @@
-use crate::api::{ApiClient, FileProgress};
+use crate::api::{FileProgress, MusicSource};
 use crate::config::Config;
 use crate::fs_util;
 use crate::metadata;
@@ -21,8 +21,8 @@ struct SongDownloadJob {
     progress: Option<Arc<Mutex<DownloadProgress>>>,
 }
 
-pub async fn download_album(
-    api: &ApiClient,
+pub async fn download_album<A: MusicSource>(
+    api: &A,
     album: &AlbumDetail,
     config: &Config,
     progress_mode: crate::cli_progress::CliProgressMode,
@@ -44,8 +44,8 @@ pub async fn download_album(
     Ok(())
 }
 
-pub async fn download_album_with_progress(
-    api: &ApiClient,
+pub async fn download_album_with_progress<A: MusicSource>(
+    api: &A,
     album: &AlbumDetail,
     config: &Config,
     progress: Option<Arc<Mutex<DownloadProgress>>>,
@@ -260,8 +260,8 @@ fn save_album_info(path: &Path, album: &AlbumDetail) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn download_covers(
-    api: &ApiClient,
+async fn download_covers<A: MusicSource>(
+    api: &A,
     path: &Path,
     album: &AlbumDetail,
     progress: &Option<Arc<Mutex<DownloadProgress>>>,
@@ -298,8 +298,8 @@ async fn download_covers(
     Ok(cover_data)
 }
 
-async fn download_optional_file(
-    api: &ApiClient,
+async fn download_optional_file<A: MusicSource>(
+    api: &A,
     url: &str,
     dest: &Path,
     context: String,
@@ -314,7 +314,10 @@ async fn download_optional_file(
     }
 }
 
-async fn download_song_with_progress(api: &ApiClient, job: SongDownloadJob) -> anyhow::Result<()> {
+async fn download_song_with_progress<A: MusicSource>(
+    api: &A,
+    job: SongDownloadJob,
+) -> anyhow::Result<()> {
     let SongDownloadJob {
         album_path,
         song,
@@ -390,8 +393,8 @@ fn skip_existing_converted_file(
     finish_progress(progress, current, true, false);
 }
 
-async fn download_audio_file(
-    api: &ApiClient,
+async fn download_audio_file<A: MusicSource>(
+    api: &A,
     song: &SongDetail,
     dest: &Path,
     current: usize,
@@ -425,10 +428,11 @@ async fn download_audio_file(
     let song_name = song.name.clone();
     set_progress_status(progress, current, &song_name, SongStatus::Getting);
 
+    let mut on_progress = |file_progress| {
+        update_progress(progress, current, &song_name, file_progress);
+    };
     let result = api
-        .download_file_with_progress(&song.source_url, dest, |file_progress| {
-            update_progress(progress, current, &song_name, file_progress);
-        })
+        .download_file_with_progress(&song.source_url, dest, &mut on_progress)
         .await;
 
     match result {
@@ -441,8 +445,8 @@ async fn download_audio_file(
     }
 }
 
-async fn existing_file_is_complete(
-    api: &ApiClient,
+async fn existing_file_is_complete<A: MusicSource>(
+    api: &A,
     song: &SongDetail,
     dest: &Path,
 ) -> anyhow::Result<bool> {
@@ -469,8 +473,8 @@ async fn existing_file_is_complete(
     }
 }
 
-async fn download_lyrics(
-    api: &ApiClient,
+async fn download_lyrics<A: MusicSource>(
+    api: &A,
     config: &Config,
     path: &Path,
     song: &SongDetail,
@@ -599,8 +603,8 @@ fn write_metadata_if_needed(
     Ok(())
 }
 
-pub async fn download_all(
-    api: &ApiClient,
+pub async fn download_all<A: MusicSource>(
+    api: &A,
     config: &Config,
     progress_mode: crate::cli_progress::CliProgressMode,
 ) -> anyhow::Result<()> {
@@ -643,8 +647,8 @@ pub async fn download_all(
     Ok(())
 }
 
-pub async fn download_albums_by_name(
-    api: &ApiClient,
+pub async fn download_albums_by_name<A: MusicSource>(
+    api: &A,
     config: &Config,
     names: &[String],
     exact: bool,
@@ -709,8 +713,8 @@ pub async fn download_albums_by_name(
     Ok(())
 }
 
-pub async fn download_albums_by_id(
-    api: &ApiClient,
+pub async fn download_albums_by_id<A: MusicSource>(
+    api: &A,
     config: &Config,
     ids: &[String],
     dry_run: bool,
