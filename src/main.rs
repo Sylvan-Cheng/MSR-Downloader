@@ -32,7 +32,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
-use tui::download::{current_transfer_index, draw_download_screen, is_transfer_idle};
+use tui::download::{current_transfer_index, draw_download_screen};
 use tui::input::{album_mouse_action, is_key, screen_from_header_click};
 use tui::layout::{app_chunks, contains_point, page_step, select_body_chunks};
 use tui::overlay::draw_help_overlay;
@@ -837,10 +837,10 @@ mod tests {
 
     #[test]
     fn transfer_idle_requires_no_active_or_completed_transfer() {
-        assert!(is_transfer_idle(false, 0, 0));
-        assert!(!is_transfer_idle(false, 1, 0));
-        assert!(!is_transfer_idle(false, 0, 1));
-        assert!(!is_transfer_idle(true, 0, 0));
+        assert!(tui::download::is_transfer_idle(false, 0, 0));
+        assert!(!tui::download::is_transfer_idle(false, 1, 0));
+        assert!(!tui::download::is_transfer_idle(false, 0, 1));
+        assert!(!tui::download::is_transfer_idle(true, 0, 0));
     }
 
     #[test]
