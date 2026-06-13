@@ -6,6 +6,7 @@ use reqwest::{
     header::{ACCEPT_ENCODING, CONTENT_RANGE, RANGE},
     Client, StatusCode,
 };
+use serde::de::DeserializeOwned;
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
@@ -37,60 +38,33 @@ impl ApiClient {
     }
 
     pub async fn get_albums(&self) -> anyhow::Result<Vec<AlbumBrief>> {
-        let url = format!("{}/albums", self.base_url);
-        let resp: ApiResponse<Vec<AlbumBrief>> = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .with_context(|| format!("failed to request albums from {url}"))?
-            .error_for_status()
-            .with_context(|| format!("album request failed: {url}"))?
-            .json()
-            .await
-            .with_context(|| format!("failed to parse album response from {url}"))?;
-
-        if resp.code != 0 {
-            anyhow::bail!("API error: {}", resp.msg);
-        }
-
-        Ok(resp.data)
+        self.fetch_api("albums").await
     }
 
     pub async fn get_album_detail(&self, cid: &str) -> anyhow::Result<AlbumDetail> {
-        let url = format!("{}/album/{}/detail", self.base_url, cid);
-        let resp: ApiResponse<AlbumDetail> = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .with_context(|| format!("failed to request album detail from {url}"))?
-            .error_for_status()
-            .with_context(|| format!("album detail request failed: {url}"))?
-            .json()
-            .await
-            .with_context(|| format!("failed to parse album detail response from {url}"))?;
-
-        if resp.code != 0 {
-            anyhow::bail!("API error: {}", resp.msg);
-        }
-
-        Ok(resp.data)
+        self.fetch_api(&format!("album/{cid}/detail")).await
     }
 
     pub async fn get_song(&self, cid: &str) -> anyhow::Result<SongDetail> {
-        let url = format!("{}/song/{}", self.base_url, cid);
-        let resp: ApiResponse<SongDetail> = self
+        self.fetch_api(&format!("song/{cid}")).await
+    }
+
+    async fn fetch_api<T>(&self, path: &str) -> anyhow::Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let url = format!("{}/{}", self.base_url, path);
+        let resp: ApiResponse<T> = self
             .client
             .get(&url)
             .send()
             .await
-            .with_context(|| format!("failed to request song from {url}"))?
+            .with_context(|| format!("failed to request {url}"))?
             .error_for_status()
-            .with_context(|| format!("song request failed: {url}"))?
+            .with_context(|| format!("request failed: {url}"))?
             .json()
             .await
-            .with_context(|| format!("failed to parse song response from {url}"))?;
+            .with_context(|| format!("failed to parse response from {url}"))?;
 
         if resp.code != 0 {
             anyhow::bail!("API error: {}", resp.msg);
