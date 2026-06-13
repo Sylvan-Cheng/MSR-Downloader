@@ -75,7 +75,7 @@ fn image_mime_type(data: &[u8]) -> &'static str {
 }
 
 fn write_flac_metadata(
-    _path: &Path,
+    path: &Path,
     _title: &str,
     _artist: &str,
     _album: &str,
@@ -83,9 +83,10 @@ fn write_flac_metadata(
     _cover_data: Option<&[u8]>,
     _lyrics: Option<&str>,
 ) -> anyhow::Result<()> {
-    // FLAC metadata writing would require additional crate like metaflac
-    // For now, skip FLAC metadata
-    Ok(())
+    anyhow::bail!(
+        "FLAC metadata writing is not supported yet for {}; audio file was kept unchanged",
+        path.display()
+    )
 }
 
 pub fn convert_wav_to_flac(
@@ -123,6 +124,16 @@ mod tests {
         let path = Path::new("test.ogg");
         let result = write_metadata(path, "title", "artist", "album", 1, None, None);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_write_metadata_flac_reports_unsupported() {
+        let path = Path::new("test.flac");
+        let error = write_metadata(path, "title", "artist", "album", 1, None, None)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("FLAC metadata writing is not supported yet"));
     }
 
     #[test]
