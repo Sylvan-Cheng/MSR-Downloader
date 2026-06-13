@@ -2,6 +2,7 @@ mod api;
 mod cli_progress;
 mod config;
 mod downloader;
+mod file_fetcher;
 mod format;
 mod fs_util;
 mod metadata;
