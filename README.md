@@ -30,13 +30,13 @@ msr-downloader --version
 msr-downloader --cli --list
 
 # 下载指定专辑
-msr-downloader --cli --album "相变临界" "Innocence"
+msr-downloader --cli --album "春弦" "Innocence"
 
 # 预览名称匹配结果，不下载
-msr-downloader --cli --album "相变临界" --dry-run
+msr-downloader --cli --album "春弦" --dry-run
 
 # 精确匹配专辑名
-msr-downloader --cli --album "相变临界" --exact
+msr-downloader --cli --album "春弦" --exact
 
 # 使用 --list 输出的 CID 下载专辑
 msr-downloader --cli --album-id "<cid>"
@@ -44,17 +44,20 @@ msr-downloader --cli --album-id "<cid>"
 # 下载全部专辑（必须显式确认）
 msr-downloader --cli --all
 
+# 预览全部专辑，不下载
+msr-downloader --cli --all --dry-run
+
 # 指定输出目录
 msr-downloader --cli --all --output ./music
 
 # 日志友好的纯文本输出，不使用 ANSI 光标控制
-msr-downloader --cli --plain --album "相变临界"
+msr-downloader --cli --plain --album "春弦"
 
 # 只输出最终摘要
-msr-downloader --cli --no-progress --album "相变临界"
+msr-downloader --cli --no-progress --album "春弦"
 
 # 临时覆盖并发数
-msr-downloader --cli --concurrency 2 --album "相变临界"
+msr-downloader --cli --concurrency 2 --album "春弦"
 
 # 查看最终配置
 msr-downloader --print-config
@@ -77,6 +80,10 @@ msr-downloader --clean-parts --yes
 
 `--cli` 本身不会开始下载。下载全部专辑必须显式传入 `--all`，避免误操作下载完整曲库。
 
+`--dry-run` 是预览模式，只显示将匹配、下载或清理的目标，不会实际下载文件或删除 `.part` 断点文件。
+
+CLI 下载过程中按 `Ctrl+C` 会中止当前传输，并保留未完成的 `.part` 断点文件，后续再次下载同一目标时可继续续传。
+
 ### TUI 快捷键
 
 | 快捷键 | 功能 |
@@ -88,7 +95,6 @@ msr-downloader --clean-parts --yes
 | `Esc` | 清空搜索 |
 | `Enter` | 开始下载队列 |
 | `Tab` | 在专辑页和传输页之间切换 |
-| `1` / `2` | 直接切换到专辑页/传输页 |
 | `Q` | 退出 |
 
 ## 配置文件
@@ -200,9 +206,9 @@ src/
 Release binary workflow 只支持手动触发，不会在 push 或 release 事件自动运行。发布步骤：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
-gh workflow run "Release Binaries" -f tag=v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
+gh workflow run "Release Binaries" -f tag=v0.2.0
 ```
 
 workflow 会在 Windows 和 Linux 上运行 `cargo test --locked` 与 `cargo build --release --locked`，然后把二进制上传到对应 tag 的 GitHub Release。
