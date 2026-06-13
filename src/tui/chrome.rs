@@ -1,5 +1,6 @@
+use crate::tui::state::AppScreen;
+use crate::tui::theme::COLOR_PRIMARY;
 use crate::tui::theme::{COLOR_MUTED, COLOR_SECONDARY};
-use crate::{tui::theme::COLOR_PRIMARY, AppScreen};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},

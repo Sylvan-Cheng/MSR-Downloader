@@ -42,6 +42,7 @@ use tokio::task::JoinHandle;
 use tui::chrome::{create_block, draw_app_header, draw_controls_bar, draw_status_bar};
 use tui::layout::{app_chunks, contains_point, page_step, select_body_chunks};
 use tui::overlay::draw_help_overlay;
+use tui::state::{AlbumMouseAction, AppScreen, DownloadScreen, HelpOverlay, TuiState};
 use tui::theme::{
     tui_status_style, COLOR_ERROR, COLOR_INFO, COLOR_MUTED, COLOR_PRIMARY, COLOR_SECONDARY,
     COLOR_SUCCESS, COLOR_WARNING,
@@ -264,127 +265,6 @@ fn validate_cli_action(cli: &Cli) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AppScreen {
-    Select,
-    Downloading,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HelpOverlay {
-    Hidden,
-    Visible,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AlbumMouseAction {
-    Focus(usize),
-    Toggle(usize),
-}
-
-struct DownloadScreen<'a> {
-    albums: &'a [models::AlbumBrief],
-    selected_albums: &'a [bool],
-    current_album_idx: usize,
-    current: usize,
-    total: usize,
-    progress: &'a DownloadProgress,
-    downloaded: &'a [String],
-    done: bool,
-    confirm_quit: bool,
-}
-
-struct TuiState {
-    screen: AppScreen,
-    selected: usize,
-    selected_albums: Vec<bool>,
-    search_query: String,
-    search_active: bool,
-    help_overlay: HelpOverlay,
-    downloaded_names: Vec<String>,
-    download_queue: Vec<usize>,
-    download_current: usize,
-    transfer_done: bool,
-    active_album_idx: usize,
-    confirm_quit: bool,
-}
-
-impl TuiState {
-    fn new(album_count: usize) -> Self {
-        Self {
-            screen: AppScreen::Select,
-            selected: 0,
-            selected_albums: vec![false; album_count],
-            search_query: String::new(),
-            search_active: false,
-            help_overlay: HelpOverlay::Hidden,
-            downloaded_names: Vec::new(),
-            download_queue: Vec::new(),
-            download_current: 0,
-            transfer_done: false,
-            active_album_idx: 0,
-            confirm_quit: false,
-        }
-    }
-
-    fn transfer_active(
-        &self,
-        download_handle: &Option<JoinHandle<anyhow::Result<Vec<String>>>>,
-    ) -> bool {
-        download_handle.is_some() && !self.transfer_done
-    }
-
-    fn clear_search(&mut self) {
-        self.search_active = false;
-        self.search_query.clear();
-    }
-
-    fn open_help(&mut self) {
-        self.help_overlay = HelpOverlay::Visible;
-    }
-
-    fn close_help(&mut self) {
-        self.help_overlay = HelpOverlay::Hidden;
-    }
-
-    fn confirm_or_quit(
-        &mut self,
-        download_handle: &Option<JoinHandle<anyhow::Result<Vec<String>>>>,
-    ) -> bool {
-        if self.transfer_active(download_handle) {
-            self.confirm_quit = true;
-            self.screen = AppScreen::Downloading;
-            false
-        } else {
-            true
-        }
-    }
-
-    fn start_queue(&mut self) {
-        self.download_queue = self
-            .selected_albums
-            .iter()
-            .enumerate()
-            .filter(|(_, &selected)| selected)
-            .map(|(index, _)| index)
-            .collect();
-
-        if let Some(&first_album) = self.download_queue.first() {
-            self.download_current = 0;
-            self.downloaded_names.clear();
-            self.transfer_done = false;
-            self.confirm_quit = false;
-            self.active_album_idx = first_album;
-        }
-    }
-
-    fn clear_selection_after_done(&mut self) {
-        if self.transfer_done {
-            self.selected_albums.fill(false);
-        }
-    }
 }
 
 fn filtered_album_indices(albums: &[models::AlbumBrief], query: &str) -> Vec<usize> {
