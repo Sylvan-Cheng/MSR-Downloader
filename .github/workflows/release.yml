@@ -1,0 +1,78 @@
+name: Release Binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to upload assets to
+        required: true
+        default: v0.1.0
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            binary: msr-downloader
+            asset: msr-downloader-linux-x86_64
+          - name: windows-x86_64
+            os: windows-latest
+            binary: msr-downloader.exe
+            asset: msr-downloader-windows-x86_64.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Test
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath "Cargo.lock") {
+            cargo test --locked
+          } else {
+            cargo test
+          }
+
+      - name: Build
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath "Cargo.lock") {
+            cargo build --release --locked
+          } else {
+            cargo build --release
+          }
+
+      - name: Prepare asset
+        shell: pwsh
+        run: Copy-Item -LiteralPath "target/release/${{ matrix.binary }}" -Destination "${{ matrix.asset }}"
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag }}
+        run: gh release upload "$env:TAG_NAME" "${{ matrix.asset }}" --clobber
+        shell: pwsh
