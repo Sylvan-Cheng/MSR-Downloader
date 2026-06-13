@@ -447,10 +447,10 @@ fn save_album_info(path: &Path, album: &AlbumDetail) -> anyhow::Result<()> {
     content.push_str("songs:\n");
 
     for song in &album.songs {
-        let artists = if song.artistes.is_empty() {
+        let artists = if song.artists.is_empty() {
             "Unknown".to_string()
         } else {
-            song.artistes.join("、")
+            song.artists.join("、")
         };
         content.push_str(&format!("  {} - {}\n", song.name, artists));
     }

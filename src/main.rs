@@ -1463,7 +1463,7 @@ mod tests {
             cid: name.to_string(),
             name: name.to_string(),
             cover_url: String::new(),
-            artistes: Vec::new(),
+            artists: Vec::new(),
         }
     }
 

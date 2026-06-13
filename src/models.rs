@@ -14,16 +14,16 @@ pub struct AlbumBrief {
     pub name: String,
     #[serde(rename = "coverUrl")]
     pub cover_url: String,
-    #[serde(default)]
-    pub artistes: Vec<String>,
+    #[serde(default, rename = "artistes")]
+    pub artists: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SongBrief {
     pub cid: String,
     pub name: String,
-    #[serde(default)]
-    pub artistes: Vec<String>,
+    #[serde(default, rename = "artistes")]
+    pub artists: Vec<String>,
 }
 
 #[allow(dead_code)]
@@ -78,7 +78,7 @@ mod tests {
         assert_eq!(album.cid, "123");
         assert_eq!(album.name, "Test Album");
         assert_eq!(album.cover_url, "https://example.com/cover.jpg");
-        assert_eq!(album.artistes.len(), 2);
+        assert_eq!(album.artists.len(), 2);
     }
 
     #[test]
