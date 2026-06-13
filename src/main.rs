@@ -34,7 +34,7 @@ use ratatui::{
     Terminal,
 };
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 
@@ -69,7 +69,7 @@ const COLOR_MUTED: Color = Color::Rgb(92, 98, 100);
     name = "msr-downloader",
     version,
     about = "Monster Siren Music Downloader",
-    after_help = "Examples:\n  msr-downloader\n  msr-downloader --cli --list\n  msr-downloader --cli --album \"相变临界\"\n  msr-downloader --cli --album \"相变临界\" --exact --dry-run\n  msr-downloader --cli --album-id 123456\n  msr-downloader --cli --all --output ./music\n  msr-downloader --clean-parts --dry-run\n  msr-downloader --clean-parts --yes"
+    after_help = "Examples:\n  msr-downloader\n  msr-downloader --init-config\n  msr-downloader --check-config\n  msr-downloader --cli --list\n  msr-downloader --cli --album \"相变临界\"\n  msr-downloader --cli --album \"相变临界\" --exact --dry-run\n  msr-downloader --cli --album-id 123456\n  msr-downloader --cli --all --output ./music\n  msr-downloader --clean-parts --dry-run\n  msr-downloader --clean-parts --yes"
 )]
 struct Cli {
     #[arg(
@@ -109,6 +109,13 @@ struct Cli {
     concurrency: Option<usize>,
     #[arg(long, help = "Print resolved configuration and exit")]
     print_config: bool,
+    #[arg(
+        long,
+        help = "Create a sample config file at --config path or msr.toml"
+    )]
+    init_config: bool,
+    #[arg(long, help = "Validate resolved configuration and exit")]
+    check_config: bool,
     #[arg(long, help = "Clean .part files from the output directory")]
     clean_parts: bool,
     #[arg(
@@ -141,6 +148,52 @@ fn print_config_summary(config: &Config) {
         "  convert.wav_to_flac = {}",
         config.download.convert.wav_to_flac
     );
+}
+
+fn default_config_toml() -> &'static str {
+    r#"[api]
+base_url = "https://monster-siren.hypergryph.com/api"
+timeout = 30
+
+[download]
+output_dir = "./MSR_Albums"
+concurrency = 2
+
+[download.include]
+lyrics = true
+covers = true
+album_info = true
+metadata = true
+
+[download.convert]
+enabled = false
+wav_to_flac = false
+delete_original = true
+flac_compression = 5
+
+[naming]
+album_folder = "{album_name}"
+song_file = "{song_name}.{ext}"
+"#
+}
+
+fn init_config_file(path: &Path, overwrite: bool) -> anyhow::Result<()> {
+    if path.exists() && !overwrite {
+        anyhow::bail!(
+            "refusing to overwrite existing config {}; pass --yes to overwrite",
+            path.display()
+        );
+    }
+
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::write(path, default_config_toml())?;
+    Ok(())
 }
 
 fn collect_partial_files(dir: &std::path::Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
@@ -1453,6 +1506,18 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    if cli.init_config {
+        let path = cli.config.as_deref().unwrap_or(Path::new("msr.toml"));
+        init_config_file(path, cli.yes)?;
+        println!(
+            "{} CONFIG WRITTEN {}",
+            "MSR//".cyan().bold(),
+            path.display()
+        );
+        return Ok(());
+    }
+
     let mut config = Config::load(cli.config.as_deref())?;
 
     if let Some(output) = cli.output.as_ref() {
@@ -1466,6 +1531,12 @@ async fn main() -> anyhow::Result<()> {
     config.validate()?;
 
     if cli.print_config {
+        print_config_summary(&config);
+        return Ok(());
+    }
+
+    if cli.check_config {
+        println!("{} CONFIG OK", "MSR//".cyan().bold());
         print_config_summary(&config);
         return Ok(());
     }
@@ -1807,5 +1878,52 @@ mod tests {
     fn cli_print_config_flag_parses() {
         let cli = Cli::try_parse_from(["msr-downloader", "--print-config"]).unwrap();
         assert!(cli.print_config);
+    }
+
+    #[test]
+    fn default_config_toml_is_valid() {
+        let config: Config = toml::from_str(default_config_toml()).unwrap();
+
+        assert!(config.validate().is_ok());
+        assert_eq!(config.download.output_dir, PathBuf::from("./MSR_Albums"));
+    }
+
+    #[test]
+    fn init_config_file_refuses_existing_without_overwrite() {
+        let root = std::env::temp_dir().join(format!(
+            "msr-downloader-init-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("msr.toml");
+        std::fs::write(&path, "existing").unwrap();
+
+        assert!(init_config_file(&path, false).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn init_config_file_writes_sample_config() {
+        let root = std::env::temp_dir().join(format!(
+            "msr-downloader-init-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = root.join("nested").join("msr.toml");
+
+        init_config_file(&path, false).unwrap();
+        let config: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(config.validate().is_ok());
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
