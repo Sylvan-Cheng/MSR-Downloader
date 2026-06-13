@@ -1,6 +1,6 @@
 use crate::models;
 use crate::tui::chrome::{
-    controls_line, controls_text, create_block, draw_app_header, draw_controls_bar, draw_status_bar,
+    controls_line, create_block, draw_app_header, draw_controls_bar, draw_status_bar,
 };
 use crate::tui::layout::{app_chunks, select_body_chunks};
 use crate::tui::overlay::draw_help_overlay;
@@ -231,12 +231,13 @@ pub(crate) fn select_status_text(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn select_controls_text(
     search_active: bool,
     transfer_active: bool,
     selected_count: usize,
 ) -> String {
-    controls_text(select_control_items(
+    crate::tui::chrome::controls_text(select_control_items(
         search_active,
         transfer_active,
         selected_count,

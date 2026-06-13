@@ -1,10 +1,10 @@
 use crate::api::{FileProgress, MusicSource};
+use crate::cli_style;
 use crate::config::Config;
 use crate::fs_util;
 use crate::metadata;
 use crate::models::{AlbumDetail, SongDetail};
 use crate::progress::{DownloadProgress, SongStatus};
-use owo_colors::OwoColorize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -237,7 +237,11 @@ fn push_error(progress: &Option<Arc<Mutex<DownloadProgress>>>, message: String) 
             prog.errors.push(message);
         }
     } else {
-        eprintln!("  {} {}", "✗".red().bold(), message.red());
+        eprintln!(
+            "  {} {}",
+            cli_style::error("ERR"),
+            cli_style::error(&message)
+        );
     }
 }
 
@@ -461,12 +465,11 @@ async fn existing_file_is_complete<A: MusicSource>(
         Err(e) => {
             eprintln!(
                 "  {} {}",
-                "CHK".yellow().bold(),
-                format!(
+                cli_style::warning("CHK"),
+                cli_style::warning(&format!(
                     "Could not verify existing file for {}; re-downloading: {}",
                     song.name, e
-                )
-                .yellow()
+                ))
             );
             Ok(false)
         }
@@ -545,8 +548,11 @@ fn convert_if_needed(
             if progress.is_none() {
                 eprintln!(
                     "  {} {}",
-                    "✓".green().bold(),
-                    format!("Converted to FLAC: {}", fs_util::sanitize(&song.name)).green()
+                    cli_style::success("OK"),
+                    cli_style::success(&format!(
+                        "Converted to FLAC: {}",
+                        fs_util::sanitize(&song.name)
+                    ))
                 );
             }
 
@@ -610,30 +616,40 @@ pub async fn download_all<A: MusicSource>(
     api: &A,
     config: &Config,
     progress_mode: crate::cli_progress::CliProgressMode,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let albums = api.get_albums().await?;
-    println!("{} {} ALBUMS", "MSR//".cyan().bold(), albums.len());
+    if dry_run {
+        let matched: Vec<_> = albums.iter().collect();
+        print_matched_albums("AVAILABLE", &matched);
+        return Ok(());
+    }
+
+    println!("{} {} ALBUMS", cli_style::msr(), albums.len());
 
     let mut failures = Vec::new();
     for (i, album_brief) in albums.iter().enumerate() {
         println!(
             "\n{} [{}/{}] {}",
-            "ALBUM".cyan().bold(),
+            cli_style::title("ALBUM"),
             i + 1,
             albums.len(),
-            album_brief.name.white().bold()
+            cli_style::value(&album_brief.name)
         );
         match api.get_album_detail(&album_brief.cid).await {
             Ok(album_detail) => {
                 if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
+                    if crate::cli_progress::is_interrupted(&e) {
+                        return Err(e);
+                    }
                     let message = format!("{}: {}", album_brief.name, e);
-                    eprintln!("{} {}", "ERR".red().bold(), message.red());
+                    eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
                     failures.push(message);
                 }
             }
             Err(e) => {
                 let message = format!("{}: {}", album_brief.name, e);
-                eprintln!("{} {}", "ERR".red().bold(), message.red());
+                eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
                 failures.push(message);
             }
         }
@@ -686,20 +702,23 @@ pub async fn download_albums_by_name<A: MusicSource>(
     for album_brief in matched {
         println!(
             "\n{} {}",
-            "ALBUM".cyan().bold(),
-            album_brief.name.white().bold()
+            cli_style::title("ALBUM"),
+            cli_style::value(&album_brief.name)
         );
         match api.get_album_detail(&album_brief.cid).await {
             Ok(album_detail) => {
                 if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
+                    if crate::cli_progress::is_interrupted(&e) {
+                        return Err(e);
+                    }
                     let message = format!("{}: {}", album_brief.name, e);
-                    eprintln!("{} {}", "ERR".red().bold(), message.red());
+                    eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
                     failures.push(message);
                 }
             }
             Err(e) => {
                 let message = format!("{}: {}", album_brief.name, e);
-                eprintln!("{} {}", "ERR".red().bold(), message.red());
+                eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
                 failures.push(message);
             }
         }
@@ -743,20 +762,23 @@ pub async fn download_albums_by_id<A: MusicSource>(
     for album_brief in matched {
         println!(
             "\n{} {}",
-            "ALBUM".cyan().bold(),
-            album_brief.name.white().bold()
+            cli_style::title("ALBUM"),
+            cli_style::value(&album_brief.name)
         );
         match api.get_album_detail(&album_brief.cid).await {
             Ok(album_detail) => {
                 if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
+                    if crate::cli_progress::is_interrupted(&e) {
+                        return Err(e);
+                    }
                     let message = format!("{}: {}", album_brief.name, e);
-                    eprintln!("{} {}", "ERR".red().bold(), message.red());
+                    eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
                     failures.push(message);
                 }
             }
             Err(e) => {
                 let message = format!("{}: {}", album_brief.name, e);
-                eprintln!("{} {}", "ERR".red().bold(), message.red());
+                eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
                 failures.push(message);
             }
         }
@@ -774,14 +796,9 @@ pub async fn download_albums_by_id<A: MusicSource>(
 }
 
 fn print_matched_albums(label: &str, albums: &[&crate::models::AlbumBrief]) {
-    println!(
-        "{} {} {} ALBUMS",
-        "MSR//".cyan().bold(),
-        albums.len(),
-        label
-    );
+    println!("{} {} {} ALBUMS", cli_style::msr(), albums.len(), label);
     for album in albums {
-        println!("  {}  {}", album.cid.dimmed(), album.name);
+        println!("  {}  {}", cli_style::dimmed(&album.cid), album.name);
     }
 }
 
@@ -896,6 +913,7 @@ mod tests {
             &source,
             &config,
             crate::cli_progress::CliProgressMode::Summary,
+            false,
         )
         .await
         .unwrap_err()
@@ -906,6 +924,25 @@ mod tests {
             *source.detail_calls.lock().unwrap(),
             vec!["bad".to_string(), "ok".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn download_all_dry_run_lists_without_fetching_detail() {
+        let source = MockSource {
+            albums: vec![album_brief("a", "Alpha"), album_brief("b", "Beta")],
+            ..Default::default()
+        };
+
+        download_all(
+            &source,
+            &Config::default(),
+            crate::cli_progress::CliProgressMode::Summary,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(source.detail_calls.lock().unwrap().is_empty());
     }
 
     fn album_brief(cid: &str, name: &str) -> AlbumBrief {

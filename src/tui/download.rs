@@ -2,7 +2,7 @@ use crate::format;
 use crate::models;
 use crate::progress::DownloadProgress;
 use crate::tui::chrome::{
-    controls_line, controls_text, create_block, draw_app_header, draw_controls_bar, draw_status_bar,
+    controls_line, create_block, draw_app_header, draw_controls_bar, draw_status_bar,
 };
 use crate::tui::layout::app_chunks;
 use crate::tui::state::{AppScreen, DownloadScreen};
@@ -320,8 +320,9 @@ pub(crate) fn download_status_text(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn download_controls_text(confirm_quit: bool) -> String {
-    controls_text(download_control_items(confirm_quit))
+    crate::tui::chrome::controls_text(download_control_items(confirm_quit))
 }
 
 fn download_control_items(confirm_quit: bool) -> &'static [(&'static str, &'static str)] {

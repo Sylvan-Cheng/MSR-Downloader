@@ -1,5 +1,6 @@
 mod api;
 mod cli_progress;
+mod cli_style;
 mod config;
 mod downloader;
 mod file_fetcher;
@@ -25,7 +26,6 @@ use crossterm::{
         LeaveAlternateScreen,
     },
 };
-use owo_colors::OwoColorize;
 use progress::DownloadProgress;
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 use std::io;
@@ -61,13 +61,14 @@ impl Drop for TerminalGuard {
     name = "msr-downloader",
     version,
     about = "Monster Siren Music Downloader",
-    after_help = "Examples:\n  msr-downloader\n  msr-downloader --init-config\n  msr-downloader --check-config\n  msr-downloader --cli --list\n  msr-downloader --cli --album \"相变临界\"\n  msr-downloader --cli --album \"相变临界\" --exact --dry-run\n  msr-downloader --cli --album-id 123456\n  msr-downloader --cli --all --output ./music\n  msr-downloader --clean-parts --dry-run\n  msr-downloader --clean-parts --yes"
+    after_help = "Examples:\n  msr-downloader\n  msr-downloader --init-config\n  msr-downloader --check-config\n  msr-downloader --cli --list\n  msr-downloader --cli --album \"春弦\"\n  msr-downloader --cli --album \"春弦\" --exact --dry-run\n  msr-downloader --cli --album-id 123456\n  msr-downloader --cli --all --dry-run\n  msr-downloader --cli --all --output ./music\n  msr-downloader --clean-parts --dry-run\n  msr-downloader --clean-parts --yes"
 )]
 struct Cli {
     #[arg(
         short,
         long,
         value_name = "FILE",
+        help_heading = "Config",
         help = "Path to msr.toml config file"
     )]
     config: Option<PathBuf>,
@@ -75,52 +76,103 @@ struct Cli {
         short,
         long,
         value_name = "DIR",
+        help_heading = "Download",
         help = "Override download output directory"
     )]
     output: Option<PathBuf>,
-    #[arg(short, long, num_args = 1.., value_name = "NAME", help = "Download albums whose names contain the given text")]
+    #[arg(short, long, num_args = 1.., value_name = "NAME", help_heading = "Download", help = "Download albums whose names contain the given text")]
     album: Option<Vec<String>>,
-    #[arg(long, num_args = 1.., value_name = "CID", help = "Download albums by exact album CID from --list")]
+    #[arg(long, num_args = 1.., value_name = "CID", help_heading = "Download", help = "Download albums by exact album CID from --list")]
     album_id: Option<Vec<String>>,
-    #[arg(long, help = "Require --album to match album names exactly")]
+    #[arg(
+        long,
+        help_heading = "Download",
+        help = "Require --album to match album names exactly"
+    )]
     exact: bool,
-    #[arg(short, long, help = "List available albums and exit")]
+    #[arg(
+        short,
+        long,
+        help_heading = "Download",
+        help = "List available albums and exit"
+    )]
     list: bool,
     #[arg(
         long,
+        help_heading = "Download",
         help = "Download all albums; required for full-library CLI downloads"
     )]
     all: bool,
-    #[arg(long, help = "Use command-line mode instead of the default TUI")]
+    #[arg(
+        long,
+        help_heading = "General",
+        help = "Use command-line mode instead of the default TUI"
+    )]
     cli: bool,
-    #[arg(long, help = "Use plain progress output suitable for logs")]
+    #[arg(
+        long,
+        help_heading = "Output",
+        help = "Print periodic line-based progress; no cursor control"
+    )]
     plain: bool,
-    #[arg(long, help = "Only print final progress summaries")]
+    #[arg(
+        long,
+        help_heading = "Output",
+        help = "Suppress progress updates; print final summaries only"
+    )]
     no_progress: bool,
-    #[arg(long, value_name = "N", help = "Override concurrent track downloads")]
+    #[arg(
+        long,
+        value_name = "N",
+        help_heading = "Download",
+        help = "Override concurrent track downloads"
+    )]
     concurrency: Option<usize>,
-    #[arg(long, help = "Print resolved configuration and exit")]
+    #[arg(
+        long,
+        help_heading = "Config",
+        help = "Print resolved configuration and exit"
+    )]
     print_config: bool,
     #[arg(
         long,
+        help_heading = "Config",
         help = "Create a sample config file at --config path or msr.toml"
     )]
     init_config: bool,
-    #[arg(long, help = "Validate resolved configuration and exit")]
+    #[arg(
+        long,
+        help_heading = "Config",
+        help = "Validate resolved configuration and exit"
+    )]
     check_config: bool,
-    #[arg(long, help = "Clean .part files from the output directory")]
+    #[arg(
+        long,
+        help_heading = "Maintenance",
+        help = "Clean .part files from the output directory"
+    )]
     clean_parts: bool,
     #[arg(
         long,
+        help_heading = "Maintenance",
         help = "Preview cleanup targets or matched downloads without changing files"
     )]
     dry_run: bool,
-    #[arg(long, help = "Confirm destructive cleanup actions")]
+    #[arg(
+        long,
+        help_heading = "Maintenance",
+        help = "Confirm destructive cleanup actions"
+    )]
     yes: bool,
 }
 
+enum CleanPartsResult {
+    DryRun(usize),
+    Removed(usize),
+}
+
 fn print_config_summary(config: &Config) {
-    println!("MSR// CONFIG");
+    println!("{} CONFIG", cli_style::msr());
     println!("  api.base_url = {}", config.api.base_url);
     println!("  api.timeout = {}", config.api.timeout);
     println!(
@@ -140,6 +192,16 @@ fn print_config_summary(config: &Config) {
         "  convert.wav_to_flac = {}",
         config.download.convert.wav_to_flac
     );
+    println!(
+        "  convert.delete_original = {}",
+        config.download.convert.delete_original
+    );
+    println!(
+        "  convert.flac_compression = {}",
+        config.download.convert.flac_compression
+    );
+    println!("  naming.album_folder = {}", config.naming.album_folder);
+    println!("  naming.song_file = {}", config.naming.song_file);
 }
 
 fn default_config_toml() -> &'static str {
@@ -214,13 +276,17 @@ fn collect_partial_files(dir: &std::path::Path, files: &mut Vec<PathBuf>) -> any
     Ok(())
 }
 
-fn clean_partial_files(dir: &std::path::Path, dry_run: bool, yes: bool) -> anyhow::Result<usize> {
+fn clean_partial_files(
+    dir: &std::path::Path,
+    dry_run: bool,
+    yes: bool,
+) -> anyhow::Result<CleanPartsResult> {
     let mut partial_files = Vec::new();
     collect_partial_files(dir, &mut partial_files)?;
 
     println!(
         "{} SCANNED {} / {} PARTIAL FILE{} FOUND",
-        "MSR//".cyan().bold(),
+        cli_style::msr(),
         dir.display(),
         partial_files.len(),
         if partial_files.len() == 1 { "" } else { "S" }
@@ -230,7 +296,7 @@ fn clean_partial_files(dir: &std::path::Path, dry_run: bool, yes: bool) -> anyho
         for file in &partial_files {
             println!("  {}", file.display());
         }
-        return Ok(0);
+        return Ok(CleanPartsResult::DryRun(partial_files.len()));
     }
 
     if !partial_files.is_empty() && !yes {
@@ -240,7 +306,13 @@ fn clean_partial_files(dir: &std::path::Path, dry_run: bool, yes: bool) -> anyho
     for file in &partial_files {
         std::fs::remove_file(file)?;
     }
-    Ok(partial_files.len())
+    Ok(CleanPartsResult::Removed(partial_files.len()))
+}
+
+fn no_cli_action_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "no CLI action selected.\nTry:\n  msr-downloader --cli --list\n  msr-downloader --cli --album \"春弦\" --dry-run\n  msr-downloader --cli --all"
+    )
 }
 
 fn validate_cli_action(cli: &Cli) -> anyhow::Result<()> {
@@ -249,9 +321,7 @@ fn validate_cli_action(cli: &Cli) -> anyhow::Result<()> {
     }
 
     if cli.cli && !cli.list && !cli.all && cli.album.is_none() && cli.album_id.is_none() {
-        anyhow::bail!(
-            "no CLI action selected; use --list, --album <name>, --album-id <cid>, or --all"
-        );
+        return Err(no_cli_action_error());
     }
 
     Ok(())
@@ -656,11 +726,7 @@ async fn main() -> anyhow::Result<()> {
     if cli.init_config {
         let path = cli.config.as_deref().unwrap_or(Path::new("msr.toml"));
         init_config_file(path, cli.yes)?;
-        println!(
-            "{} CONFIG WRITTEN {}",
-            "MSR//".cyan().bold(),
-            path.display()
-        );
+        println!("{} CONFIG WRITTEN {}", cli_style::msr(), path.display());
         return Ok(());
     }
 
@@ -682,19 +748,26 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if cli.check_config {
-        println!("{} CONFIG OK", "MSR//".cyan().bold());
+        println!("{} CONFIG OK", cli_style::msr());
         print_config_summary(&config);
         return Ok(());
     }
 
     if cli.clean_parts {
-        let removed = clean_partial_files(&config.download.output_dir, cli.dry_run, cli.yes)?;
-        println!(
-            "{} {} PARTIAL FILE{} REMOVED",
-            "MSR//".cyan().bold(),
-            removed,
-            if removed == 1 { "" } else { "S" }
-        );
+        match clean_partial_files(&config.download.output_dir, cli.dry_run, cli.yes)? {
+            CleanPartsResult::DryRun(count) => println!(
+                "{} DRY RUN / {} PARTIAL FILE{} WOULD BE REMOVED",
+                cli_style::msr(),
+                count,
+                if count == 1 { "" } else { "S" }
+            ),
+            CleanPartsResult::Removed(removed) => println!(
+                "{} {} PARTIAL FILE{} REMOVED",
+                cli_style::msr(),
+                removed,
+                if removed == 1 { "" } else { "S" }
+            ),
+        }
         return Ok(());
     }
 
@@ -705,19 +778,22 @@ async fn main() -> anyhow::Result<()> {
     if !cli.cli && !cli.list && !cli.all && cli.album.is_none() && cli.album_id.is_none() {
         println!(
             "{} CONNECTING TO MONSTER SIREN / {}",
-            "MSR//".cyan().bold(),
+            cli_style::msr(),
             config.api.base_url
         );
         run_tui(&api, &config).await?;
         return Ok(());
     }
 
-    println!("{}", "MONSTER SIREN RECORDS // DOWNLOADER".cyan().bold());
+    println!(
+        "{}",
+        cli_style::title("MONSTER SIREN RECORDS // DOWNLOADER")
+    );
 
     if cli.list {
         let albums = api.get_albums().await?;
         for a in albums {
-            println!("  {}  {}", a.cid.dimmed(), a.name);
+            println!("  {}  {}", cli_style::dimmed(&a.cid), a.name);
         }
         return Ok(());
     }
@@ -746,16 +822,14 @@ async fn main() -> anyhow::Result<()> {
             .await?;
         !cli.dry_run
     } else if cli.all {
-        downloader::download_all(&api, &config, cli_progress_mode).await?;
-        true
+        downloader::download_all(&api, &config, cli_progress_mode, cli.dry_run).await?;
+        !cli.dry_run
     } else {
-        anyhow::bail!(
-            "no CLI action selected; use --list, --album <name>, --album-id <cid>, or --all"
-        );
+        return Err(no_cli_action_error());
     };
 
     if performed_download {
-        println!("\n{}", "MSR// TRANSFER COMPLETE".cyan().bold());
+        println!("\n{}", cli_style::title("MSR// TRANSFER COMPLETE"));
     }
     Ok(())
 }
@@ -775,10 +849,10 @@ mod tests {
 
     #[test]
     fn filtered_album_indices_matches_case_insensitive_names() {
-        let albums = vec![album("Summer OST"), album("相变临界"), album("winter")];
+        let albums = vec![album("Summer OST"), album("春弦"), album("winter")];
 
         assert_eq!(filtered_album_indices(&albums, "sum"), vec![0]);
-        assert_eq!(filtered_album_indices(&albums, "相变"), vec![1]);
+        assert_eq!(filtered_album_indices(&albums, "春弦"), vec![1]);
         assert_eq!(filtered_album_indices(&albums, ""), vec![0, 1, 2]);
     }
 
@@ -979,6 +1053,7 @@ mod tests {
         let error = validate_cli_action(&cli).unwrap_err().to_string();
 
         assert!(error.contains("no CLI action selected"));
+        assert!(error.contains("msr-downloader --cli --list"));
     }
 
     #[test]
@@ -1009,6 +1084,15 @@ mod tests {
         let cli = Cli::try_parse_from(["msr-downloader", "--cli", "--album", "test", "--dry-run"])
             .unwrap();
 
+        assert!(cli.dry_run);
+        assert!(validate_cli_action(&cli).is_ok());
+    }
+
+    #[test]
+    fn cli_all_dry_run_flag_parses() {
+        let cli = Cli::try_parse_from(["msr-downloader", "--cli", "--all", "--dry-run"]).unwrap();
+
+        assert!(cli.all);
         assert!(cli.dry_run);
         assert!(validate_cli_action(&cli).is_ok());
     }

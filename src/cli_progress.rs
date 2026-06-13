@@ -1,10 +1,11 @@
+use crate::cli_style;
 use crate::format;
 use crate::progress::{DownloadProgress, SongStatus};
 use crossterm::{
     cursor, execute,
     terminal::{Clear, ClearType},
 };
-use owo_colors::OwoColorize;
+use std::fmt;
 use std::io::{self, IsTerminal, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -16,6 +17,24 @@ pub enum CliProgressMode {
     Summary,
 }
 
+#[derive(Debug)]
+pub struct CliInterrupted;
+
+impl fmt::Display for CliInterrupted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "interrupted by Ctrl+C; partial .part files were kept for resume"
+        )
+    }
+}
+
+impl std::error::Error for CliInterrupted {}
+
+pub(crate) fn is_interrupted(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<CliInterrupted>().is_some()
+}
+
 pub(crate) async fn render_cli_progress(
     progress: &Arc<Mutex<DownloadProgress>>,
     handle: &tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -25,7 +44,9 @@ pub(crate) async fn render_cli_progress(
         return render_summary_only_cli_progress(progress, handle).await;
     }
 
-    if matches!(progress_mode, CliProgressMode::Plain) || !io::stderr().is_terminal() || no_color()
+    if matches!(progress_mode, CliProgressMode::Plain)
+        || !io::stderr().is_terminal()
+        || cli_style::no_color()
     {
         return render_plain_cli_progress(progress, handle).await;
     }
@@ -42,7 +63,10 @@ pub(crate) async fn render_cli_progress(
             break;
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        if let Err(error) = sleep_or_interrupt(std::time::Duration::from_millis(120)).await {
+            handle.abort();
+            return Err(error);
+        }
     }
 
     if let Ok(snapshot) = progress.lock().map(|progress| progress.clone()) {
@@ -58,7 +82,10 @@ async fn render_summary_only_cli_progress(
     handle: &tokio::task::JoinHandle<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
     while !handle.is_finished() {
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if let Err(error) = sleep_or_interrupt(std::time::Duration::from_millis(250)).await {
+            handle.abort();
+            return Err(error);
+        }
     }
 
     if let Ok(snapshot) = progress.lock().map(|progress| progress.clone()) {
@@ -91,13 +118,38 @@ async fn render_plain_cli_progress(
             break;
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if let Err(error) = sleep_or_interrupt(std::time::Duration::from_millis(250)).await {
+            handle.abort();
+            return Err(error);
+        }
     }
 
     if let Ok(snapshot) = progress.lock().map(|progress| progress.clone()) {
         print_cli_summary(&snapshot);
     }
     Ok(())
+}
+
+async fn sleep_or_interrupt(duration: std::time::Duration) -> anyhow::Result<()> {
+    tokio::select! {
+        _ = tokio::time::sleep(duration) => Ok(()),
+        result = tokio::signal::ctrl_c() => {
+            result?;
+            Err(CliInterrupted.into())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_error_is_detectable() {
+        let error: anyhow::Error = CliInterrupted.into();
+
+        assert!(is_interrupted(&error));
+    }
 }
 
 fn draw_cli_progress(progress: &DownloadProgress, previous_lines: usize) -> anyhow::Result<usize> {
@@ -118,8 +170,8 @@ fn draw_cli_progress(progress: &DownloadProgress, previous_lines: usize) -> anyh
     let mut lines = Vec::new();
     lines.push(format!(
         "{} {}  {}  {} ACTIVE  {}/s  ETA {}",
-        "MSR//".cyan().bold(),
-        progress.album_name.white().bold(),
+        cli_style::msr(),
+        cli_style::value(&progress.album_name),
         progress_line(
             overall,
             progress.completed_songs as u64,
@@ -151,7 +203,11 @@ fn draw_cli_progress(progress: &DownloadProgress, previous_lines: usize) -> anyh
     }
 
     for error in progress.errors.iter().rev().take(3).rev() {
-        lines.push(format!("  {} {}", "ERR".red().bold(), error.red()));
+        lines.push(format!(
+            "  {} {}",
+            cli_style::error("ERR"),
+            cli_style::error(error)
+        ));
     }
 
     for line in &lines {
@@ -163,12 +219,12 @@ fn draw_cli_progress(progress: &DownloadProgress, previous_lines: usize) -> anyh
 
 fn colored_status(status: SongStatus) -> String {
     match status {
-        SongStatus::Failed => status.code().red().bold().to_string(),
-        SongStatus::Skipped => status.code().dimmed().bold().to_string(),
-        SongStatus::Done | SongStatus::Resuming => status.code().cyan().bold().to_string(),
-        SongStatus::Checking | SongStatus::Tagging => status.code().yellow().bold().to_string(),
-        SongStatus::Queued => status.code().dimmed().to_string(),
-        SongStatus::Getting => status.code().white().bold().to_string(),
+        SongStatus::Failed => cli_style::error(status.code()),
+        SongStatus::Skipped => cli_style::dimmed(status.code()),
+        SongStatus::Done | SongStatus::Resuming => cli_style::title(status.code()),
+        SongStatus::Checking | SongStatus::Tagging => cli_style::warning(status.code()),
+        SongStatus::Queued => cli_style::dimmed(status.code()),
+        SongStatus::Getting => cli_style::value(status.code()),
     }
 }
 
@@ -212,14 +268,10 @@ fn print_plain_progress(progress: &DownloadProgress) {
 
 fn print_cli_summary(progress: &DownloadProgress) {
     let has_issues = progress.failed_count() > 0 || !progress.errors.is_empty();
-    let status = if no_color() && has_issues {
-        "MSR// TRANSFER INCOMPLETE".to_string()
-    } else if no_color() {
-        "MSR// TRANSFER SUMMARY".to_string()
-    } else if has_issues {
-        "MSR// TRANSFER INCOMPLETE".red().bold().to_string()
+    let status = if has_issues {
+        cli_style::error("MSR// TRANSFER INCOMPLETE")
     } else {
-        "MSR// TRANSFER SUMMARY".cyan().bold().to_string()
+        cli_style::title("MSR// TRANSFER SUMMARY")
     };
     eprintln!("\n{}", status);
     eprintln!(
@@ -248,7 +300,7 @@ fn progress_line(ratio: f64, current: u64, total: u64, unit: &str) -> String {
         let total_mb = total as f64 / 1024.0 / 1024.0;
         format!(
             "{} {:>3}% {:>6.1}/{:<6.1} MB",
-            bar.cyan(),
+            cli_style::title(&bar),
             percent,
             downloaded_mb,
             total_mb
@@ -256,15 +308,11 @@ fn progress_line(ratio: f64, current: u64, total: u64, unit: &str) -> String {
     } else {
         format!(
             "{} {:>3}% {}/{} {}",
-            bar.cyan(),
+            cli_style::title(&bar),
             percent,
             current,
             total,
             unit
         )
     }
-}
-
-fn no_color() -> bool {
-    std::env::var_os("NO_COLOR").is_some()
 }

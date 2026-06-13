@@ -73,6 +73,7 @@ pub(crate) fn controls_line(items: &'static [(&'static str, &'static str)]) -> L
     )
 }
 
+#[cfg(test)]
 pub(crate) fn controls_text(items: &[(&str, &str)]) -> String {
     items.iter().fold(String::new(), |mut text, (key, label)| {
         text.push_str(key);
