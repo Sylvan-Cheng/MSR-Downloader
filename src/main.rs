@@ -225,6 +225,91 @@ struct DownloadScreen<'a> {
     confirm_quit: bool,
 }
 
+struct TuiState {
+    screen: AppScreen,
+    selected: usize,
+    selected_albums: Vec<bool>,
+    search_query: String,
+    search_active: bool,
+    help_overlay: HelpOverlay,
+    downloaded_names: Vec<String>,
+    download_queue: Vec<usize>,
+    download_current: usize,
+    transfer_done: bool,
+    active_album_idx: usize,
+    confirm_quit: bool,
+}
+
+impl TuiState {
+    fn new(album_count: usize) -> Self {
+        Self {
+            screen: AppScreen::Select,
+            selected: 0,
+            selected_albums: vec![false; album_count],
+            search_query: String::new(),
+            search_active: false,
+            help_overlay: HelpOverlay::Hidden,
+            downloaded_names: Vec::new(),
+            download_queue: Vec::new(),
+            download_current: 0,
+            transfer_done: false,
+            active_album_idx: 0,
+            confirm_quit: false,
+        }
+    }
+
+    fn transfer_active(&self, download_handle: &Option<JoinHandle<anyhow::Result<Vec<String>>>>) -> bool {
+        download_handle.is_some() && !self.transfer_done
+    }
+
+    fn clear_search(&mut self) {
+        self.search_active = false;
+        self.search_query.clear();
+    }
+
+    fn open_help(&mut self) {
+        self.help_overlay = HelpOverlay::Visible;
+    }
+
+    fn close_help(&mut self) {
+        self.help_overlay = HelpOverlay::Hidden;
+    }
+
+    fn confirm_or_quit(&mut self, download_handle: &Option<JoinHandle<anyhow::Result<Vec<String>>>>) -> bool {
+        if self.transfer_active(download_handle) {
+            self.confirm_quit = true;
+            self.screen = AppScreen::Downloading;
+            false
+        } else {
+            true
+        }
+    }
+
+    fn start_queue(&mut self) {
+        self.download_queue = self
+            .selected_albums
+            .iter()
+            .enumerate()
+            .filter(|(_, &selected)| selected)
+            .map(|(index, _)| index)
+            .collect();
+
+        if let Some(&first_album) = self.download_queue.first() {
+            self.download_current = 0;
+            self.downloaded_names.clear();
+            self.transfer_done = false;
+            self.confirm_quit = false;
+            self.active_album_idx = first_album;
+        }
+    }
+
+    fn clear_selection_after_done(&mut self) {
+        if self.transfer_done {
+            self.selected_albums.fill(false);
+        }
+    }
+}
+
 fn filtered_album_indices(albums: &[models::AlbumBrief], query: &str) -> Vec<usize> {
     let query = query.trim().to_lowercase();
     albums
@@ -966,19 +1051,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut screen = AppScreen::Select;
-    let mut selected = 0usize;
-    let mut selected_albums: Vec<bool> = vec![false; albums.len()];
-    let mut search_query = String::new();
-    let mut search_active = false;
-    let mut help_overlay = HelpOverlay::Hidden;
-    let mut downloaded_names: Vec<String> = Vec::new();
-
-    let mut download_queue: Vec<usize> = Vec::new();
-    let mut download_current = 0usize;
-    let mut transfer_done = false;
-    let mut active_album_idx = 0usize;
-    let mut confirm_quit = false;
+    let mut state = TuiState::new(albums.len());
     let mut download_handle: Option<JoinHandle<anyhow::Result<Vec<String>>>> = None;
 
     let progress = Arc::new(Mutex::new(DownloadProgress::new("", 0)));
@@ -989,7 +1062,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                 if let Some(handle) = download_handle.take() {
                     match handle.await {
                         Ok(Ok(names)) => {
-                            downloaded_names = names;
+                            state.downloaded_names = names;
                         }
                         Ok(Err(e)) => {
                             if let Ok(mut prog) = progress.lock() {
@@ -997,80 +1070,76 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                             }
                         }
                         Err(e) => {
-                            downloaded_names.clear();
+                            state.downloaded_names.clear();
                             if let Ok(mut prog) = progress.lock() {
                                 prog.errors.push(format!("Task error: {}", e));
                             }
                         }
                     }
-                    transfer_done = true;
+                    state.transfer_done = true;
                 }
             }
         }
 
-        match screen {
+        match state.screen {
             AppScreen::Select => {
-                let visible_indices = filtered_album_indices(&albums, &search_query);
-                ensure_visible_selection(&mut selected, &visible_indices);
+                let visible_indices = filtered_album_indices(&albums, &state.search_query);
+                ensure_visible_selection(&mut state.selected, &visible_indices);
 
                 terminal.draw(|f| {
                     draw_select_screen(
                         f,
                         &albums,
-                        selected,
-                        &selected_albums,
-                        download_handle.is_some() || transfer_done,
-                        &search_query,
-                        search_active,
-                        help_overlay,
+                        state.selected,
+                        &state.selected_albums,
+                        download_handle.is_some() || state.transfer_done,
+                        &state.search_query,
+                        state.search_active,
+                        state.help_overlay,
                     );
                 })?;
 
                 if event::poll(std::time::Duration::from_millis(50))? {
                     match event::read()? {
                         Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                            KeyCode::Esc if help_overlay == HelpOverlay::Visible => {
-                                help_overlay = HelpOverlay::Hidden;
+                            KeyCode::Esc if state.help_overlay == HelpOverlay::Visible => {
+                                state.close_help();
                             }
                             KeyCode::Esc => {
-                                search_active = false;
-                                search_query.clear();
+                                state.clear_search();
                             }
                             KeyCode::Char('?') => {
-                                help_overlay = HelpOverlay::Visible;
+                                state.open_help();
                             }
-                            KeyCode::Backspace if search_active => {
-                                search_query.pop();
+                            KeyCode::Backspace if state.search_active => {
+                                state.search_query.pop();
                             }
-                            KeyCode::Char('/') if !search_active => {
-                                search_active = true;
+                            KeyCode::Char('/') if !state.search_active => {
+                                state.search_active = true;
                             }
-                            KeyCode::Char(ch) if search_active => {
-                                search_query.push(ch);
+                            KeyCode::Char(ch) if state.search_active => {
+                                state.search_query.push(ch);
                             }
                             code if is_key(code, 'q') => {
-                                if download_handle.is_some() && !transfer_done {
-                                    confirm_quit = true;
-                                    screen = AppScreen::Downloading;
-                                } else {
+                                if state.confirm_or_quit(&download_handle) {
                                     break;
                                 }
                             }
-                            KeyCode::Char('1') => screen = AppScreen::Select,
-                            KeyCode::Char('2') => screen = AppScreen::Downloading,
-                            KeyCode::Tab => screen = AppScreen::Downloading,
+                            KeyCode::Char('1') => state.screen = AppScreen::Select,
+                            KeyCode::Char('2') => state.screen = AppScreen::Downloading,
+                            KeyCode::Tab => state.screen = AppScreen::Downloading,
                             KeyCode::Up => {
-                                move_selection(&mut selected, &visible_indices, -1);
+                                move_selection(&mut state.selected, &visible_indices, -1);
                             }
                             KeyCode::Down => {
-                                move_selection(&mut selected, &visible_indices, 1);
+                                move_selection(&mut state.selected, &visible_indices, 1);
                             }
                             KeyCode::PageUp => {
                                 if let Ok((width, height)) = terminal_size() {
                                     let chunks = app_chunks(Rect::new(0, 0, width, height));
                                     let body = select_body_chunks(chunks[1]);
                                     move_selection(
-                                        &mut selected,
+                                        &mut state.selected,
                                         &visible_indices,
                                         -page_step(body[0]),
                                     );
@@ -1081,7 +1150,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                     let chunks = app_chunks(Rect::new(0, 0, width, height));
                                     let body = select_body_chunks(chunks[1]);
                                     move_selection(
-                                        &mut selected,
+                                        &mut state.selected,
                                         &visible_indices,
                                         page_step(body[0]),
                                     );
@@ -1089,53 +1158,44 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                             }
                             KeyCode::Home => {
                                 if let Some(&first) = visible_indices.first() {
-                                    selected = first;
+                                    state.selected = first;
                                 }
                             }
                             KeyCode::End => {
                                 if let Some(&last) = visible_indices.last() {
-                                    selected = last;
+                                    state.selected = last;
                                 }
                             }
                             KeyCode::Char(' ') => {
                                 if !visible_indices.is_empty() && download_handle.is_none() {
-                                    selected_albums[selected] = !selected_albums[selected];
+                                    state.selected_albums[state.selected] = !state.selected_albums[state.selected];
                                 }
                             }
                             code if is_key(code, 'a') && download_handle.is_none() => {
                                 let all_selected =
-                                    visible_indices.iter().all(|&idx| selected_albums[idx]);
+                                    visible_indices.iter().all(|&idx| state.selected_albums[idx]);
                                 for &idx in &visible_indices {
-                                    selected_albums[idx] = !all_selected;
+                                    state.selected_albums[idx] = !all_selected;
                                 }
                             }
                             code if is_key(code, 'c') && download_handle.is_none() => {
-                                selected_albums.fill(false);
+                                state.selected_albums.fill(false);
                             }
-                            KeyCode::Enter if search_active => {
-                                search_active = false;
+                            KeyCode::Enter if state.search_active => {
+                                state.search_active = false;
                             }
                             KeyCode::Enter if download_handle.is_none() => {
-                                download_queue = selected_albums
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(_, &s)| s)
-                                    .map(|(i, _)| i)
-                                    .collect();
+                                state.start_queue();
 
-                                if !download_queue.is_empty() {
-                                    download_current = 0;
-                                    downloaded_names.clear();
-                                    transfer_done = false;
-                                    confirm_quit = false;
-                                    active_album_idx = download_queue[0];
+                                if !state.download_queue.is_empty() {
                                     *progress.lock().expect("progress lock poisoned") =
                                         DownloadProgress::new("Preparing...", 0);
 
                                     let api_clone = api.clone();
                                     let config_clone = config.clone();
                                     let progress_clone = progress.clone();
-                                    let queued_albums: Vec<_> = download_queue
+                                    let queued_albums: Vec<_> = state
+                                        .download_queue
                                         .iter()
                                         .map(|&idx| (idx, albums[idx].clone()))
                                         .collect();
@@ -1201,7 +1261,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                         }
                                         Ok(downloaded)
                                     }));
-                                    screen = AppScreen::Downloading;
+                                    state.screen = AppScreen::Downloading;
                                 }
                             }
                             KeyCode::Enter => {}
@@ -1213,7 +1273,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                     let chunks = app_chunks(Rect::new(0, 0, width, height));
                                     let body = select_body_chunks(chunks[1]);
                                     if contains_point(body[0], mouse.column, mouse.row) {
-                                        move_selection(&mut selected, &visible_indices, -1);
+                                        move_selection(&mut state.selected, &visible_indices, -1);
                                     }
                                 }
                             }
@@ -1222,7 +1282,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                     let chunks = app_chunks(Rect::new(0, 0, width, height));
                                     let body = select_body_chunks(chunks[1]);
                                     if contains_point(body[0], mouse.column, mouse.row) {
-                                        move_selection(&mut selected, &visible_indices, 1);
+                                        move_selection(&mut state.selected, &visible_indices, 1);
                                     }
                                 }
                             }
@@ -1232,11 +1292,11 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                     if let Some(next_screen) =
                                         screen_from_header_click(chunks[0], mouse.column, mouse.row)
                                     {
-                                        screen = next_screen;
+                                        state.screen = next_screen;
                                     } else {
                                         let body = select_body_chunks(chunks[1]);
                                         if let Some(action) = album_mouse_action(
-                                            selected_visible_position(&visible_indices, selected),
+                                            selected_visible_position(&visible_indices, state.selected),
                                             visible_indices.len(),
                                             body[0],
                                             mouse.column,
@@ -1247,12 +1307,12 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                                 | AlbumMouseAction::Toggle(index) => index,
                                             };
                                             if let Some(&album_index) = visible_indices.get(index) {
-                                                selected = album_index;
+                                                state.selected = album_index;
                                                 if matches!(action, AlbumMouseAction::Toggle(_))
                                                     && download_handle.is_none()
                                                 {
-                                                    selected_albums[selected] =
-                                                        !selected_albums[selected];
+                                                    state.selected_albums[state.selected] =
+                                                        !state.selected_albums[state.selected];
                                                 }
                                             }
                                         }
@@ -1267,10 +1327,10 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
             }
             AppScreen::Downloading => {
                 if let Some((queue_idx, album_idx)) =
-                    current_transfer_index(&download_queue, &albums, &progress)
+                    current_transfer_index(&state.download_queue, &albums, &progress)
                 {
-                    download_current = queue_idx;
-                    active_album_idx = album_idx;
+                    state.download_current = queue_idx;
+                    state.active_album_idx = album_idx;
                 }
 
                 if let Ok(prog) = progress.lock() {
@@ -1279,17 +1339,17 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                             f,
                             DownloadScreen {
                                 albums: &albums,
-                                selected_albums: &selected_albums,
-                                current_album_idx: active_album_idx,
-                                current: download_current + 1,
-                                total: download_queue.len(),
+                                selected_albums: &state.selected_albums,
+                                current_album_idx: state.active_album_idx,
+                                current: state.download_current + 1,
+                                total: state.download_queue.len(),
                                 progress: &prog,
-                                downloaded: &downloaded_names,
-                                done: transfer_done,
-                                confirm_quit,
+                                downloaded: &state.downloaded_names,
+                                done: state.transfer_done,
+                                confirm_quit: state.confirm_quit,
                             },
                         );
-                        if help_overlay == HelpOverlay::Visible {
+                        if state.help_overlay == HelpOverlay::Visible {
                             draw_help_overlay(f, f.area());
                         }
                     })?;
@@ -1298,35 +1358,29 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                 if event::poll(std::time::Duration::from_millis(80))? {
                     match event::read()? {
                         Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                            KeyCode::Esc if help_overlay == HelpOverlay::Visible => {
-                                help_overlay = HelpOverlay::Hidden;
+                            KeyCode::Esc if state.help_overlay == HelpOverlay::Visible => {
+                                state.close_help();
                             }
                             KeyCode::Char('?') => {
-                                help_overlay = HelpOverlay::Visible;
+                                state.open_help();
                             }
                             code if is_key(code, 'q') => {
-                                if download_handle.is_some() && !transfer_done {
-                                    confirm_quit = true;
-                                } else {
+                                if state.confirm_or_quit(&download_handle) {
                                     break;
                                 }
                             }
-                            code if confirm_quit && is_key(code, 'y') => break,
-                            code if confirm_quit && (is_key(code, 'n') || code == KeyCode::Esc) => {
-                                confirm_quit = false;
+                            code if state.confirm_quit && is_key(code, 'y') => break,
+                            code if state.confirm_quit && (is_key(code, 'n') || code == KeyCode::Esc) => {
+                                state.confirm_quit = false;
                             }
                             KeyCode::Char('1') => {
-                                if transfer_done {
-                                    selected_albums.fill(false);
-                                }
-                                screen = AppScreen::Select;
+                                state.clear_selection_after_done();
+                                state.screen = AppScreen::Select;
                             }
-                            KeyCode::Char('2') => screen = AppScreen::Downloading,
+                            KeyCode::Char('2') => state.screen = AppScreen::Downloading,
                             KeyCode::Tab => {
-                                if transfer_done {
-                                    selected_albums.fill(false);
-                                }
-                                screen = AppScreen::Select;
+                                state.clear_selection_after_done();
+                                state.screen = AppScreen::Select;
                             }
                             _ => {}
                         },
@@ -1337,10 +1391,10 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                     if let Some(next_screen) =
                                         screen_from_header_click(chunks[0], mouse.column, mouse.row)
                                     {
-                                        if next_screen == AppScreen::Select && transfer_done {
-                                            selected_albums.fill(false);
+                                        if next_screen == AppScreen::Select {
+                                            state.clear_selection_after_done();
                                         }
-                                        screen = next_screen;
+                                        state.screen = next_screen;
                                     }
                                 }
                             }
