@@ -4,6 +4,7 @@ mod downloader;
 mod format;
 mod metadata;
 mod models;
+mod progress;
 
 use api::ApiClient;
 use clap::Parser;
@@ -20,8 +21,8 @@ use crossterm::{
         LeaveAlternateScreen,
     },
 };
-use downloader::{DownloadProgress, SongStatus};
 use owo_colors::OwoColorize;
+use progress::{DownloadProgress, SongStatus};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
