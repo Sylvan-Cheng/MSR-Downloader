@@ -1,11 +1,11 @@
 use crate::api::{ApiClient, FileProgress};
 use crate::config::Config;
+use crate::fs_util;
 use crate::metadata;
 use crate::models::{AlbumDetail, SongDetail};
 use crate::progress::{DownloadProgress, SongStatus};
 use owo_colors::OwoColorize;
-use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::Semaphore;
@@ -73,7 +73,7 @@ pub async fn download_album_with_progress(
         song_details.push((idx, song_detail));
     }
 
-    validate_song_destinations(config, &album_path, &song_details)?;
+    fs_util::validate_song_destinations(config, &album_path, &song_details)?;
 
     let mut handles = Vec::new();
 
@@ -141,29 +141,10 @@ fn create_album_path(config: &Config, album: &AlbumDetail) -> anyhow::Result<Pat
     let folder_name = config
         .naming
         .album_folder
-        .replace("{album_name}", &sanitize(&album.name));
-    let path = safe_join_child(&config.download.output_dir, &folder_name)?;
+        .replace("{album_name}", &fs_util::sanitize(&album.name));
+    let path = fs_util::safe_join_child(&config.download.output_dir, &folder_name)?;
     std::fs::create_dir_all(&path)?;
     Ok(path)
-}
-
-fn validate_song_destinations(
-    config: &Config,
-    album_path: &Path,
-    songs: &[(usize, SongDetail)],
-) -> anyhow::Result<()> {
-    let mut seen = HashSet::new();
-    for (_, song) in songs {
-        let path = build_song_path(config, album_path, song)?;
-        if !seen.insert(path.clone()) {
-            anyhow::bail!(
-                "duplicate output path for song {}: {}",
-                song.name,
-                path.display()
-            );
-        }
-    }
-    Ok(())
 }
 
 fn update_progress(
@@ -285,11 +266,11 @@ async fn download_covers(
     album: &AlbumDetail,
     progress: &Option<Arc<Mutex<DownloadProgress>>>,
 ) -> anyhow::Result<Option<Vec<u8>>> {
-    let album_name = sanitize(&album.name);
+    let album_name = fs_util::sanitize(&album.name);
     let mut cover_data: Option<Vec<u8>> = None;
 
-    let ext = ext_from_url(&album.cover_url);
-    let dest = safe_join_child(path, &format!("{}_Cover.{}", album_name, ext))?;
+    let ext = fs_util::ext_from_url(&album.cover_url);
+    let dest = fs_util::safe_join_child(path, &format!("{}_Cover.{}", album_name, ext))?;
     download_optional_file(
         api,
         &album.cover_url,
@@ -303,8 +284,8 @@ async fn download_covers(
         cover_data = Some(std::fs::read(&dest)?);
     }
 
-    let ext = ext_from_url(&album.cover_de_url);
-    let dest = safe_join_child(path, &format!("{}_CoverDe.{}", album_name, ext))?;
+    let ext = fs_util::ext_from_url(&album.cover_de_url);
+    let dest = fs_util::safe_join_child(path, &format!("{}_CoverDe.{}", album_name, ext))?;
     download_optional_file(
         api,
         &album.cover_de_url,
@@ -345,8 +326,8 @@ async fn download_song_with_progress(api: &ApiClient, job: SongDownloadJob) -> a
         progress,
     } = job;
 
-    let dest = build_song_path(&config, &album_path, &song)?;
-    let existing_converted_dest = existing_converted_dest(&config, &dest, &song);
+    let dest = fs_util::build_song_path(&config, &album_path, &song)?;
+    let existing_converted_dest = fs_util::existing_converted_dest(&config, &dest, &song);
 
     let downloaded = if let Some(final_dest) = existing_converted_dest.as_deref() {
         skip_existing_converted_file(final_dest, &song, current, &progress);
@@ -384,32 +365,6 @@ async fn download_song_with_progress(api: &ApiClient, job: SongDownloadJob) -> a
     Ok(())
 }
 
-fn build_song_path(config: &Config, path: &Path, song: &SongDetail) -> anyhow::Result<PathBuf> {
-    let song_name = sanitize(&song.name);
-    let ext = ext_from_url(&song.source_url);
-
-    let filename = config
-        .naming
-        .song_file
-        .replace("{song_name}", &song_name)
-        .replace("{ext}", &ext);
-
-    safe_join_child(path, &filename)
-}
-
-fn existing_converted_dest(config: &Config, dest: &Path, song: &SongDetail) -> Option<PathBuf> {
-    if !config.download.convert.enabled || !config.download.convert.wav_to_flac {
-        return None;
-    }
-
-    if ext_from_url(&song.source_url).eq_ignore_ascii_case("wav") {
-        let flac_path = dest.with_extension("flac");
-        flac_path.exists().then_some(flac_path)
-    } else {
-        None
-    }
-}
-
 fn skip_existing_converted_file(
     final_dest: &Path,
     song: &SongDetail,
@@ -433,18 +388,6 @@ fn skip_existing_converted_file(
         },
     );
     finish_progress(progress, current, true, false);
-}
-
-fn safe_join_child(base: &Path, child: &str) -> anyhow::Result<PathBuf> {
-    if child.trim().is_empty() {
-        anyhow::bail!("output path component cannot be empty");
-    }
-
-    let mut components = Path::new(child).components();
-    match (components.next(), components.next()) {
-        (Some(Component::Normal(_)), None) => Ok(base.join(child)),
-        _ => anyhow::bail!("output path component must be a single file or folder name: {child}"),
-    }
 }
 
 async fn download_audio_file(
@@ -542,9 +485,9 @@ async fn download_lyrics(
         None => return Ok(None),
     };
 
-    let song_name = sanitize(&song.name);
-    let lyric_ext = ext_from_url(lyric_url);
-    let lyric_dest = safe_join_child(path, &format!("{}.{}", song_name, lyric_ext))?;
+    let song_name = fs_util::sanitize(&song.name);
+    let lyric_ext = fs_util::ext_from_url(lyric_url);
+    let lyric_dest = fs_util::safe_join_child(path, &format!("{}.{}", song_name, lyric_ext))?;
 
     download_optional_file(
         api,
@@ -579,7 +522,7 @@ fn convert_if_needed(
         return Ok(dest.to_path_buf());
     }
 
-    let ext = ext_from_url(&song.source_url);
+    let ext = fs_util::ext_from_url(&song.source_url);
     if ext.to_lowercase() != "wav" {
         return Ok(dest.to_path_buf());
     }
@@ -596,7 +539,7 @@ fn convert_if_needed(
                 eprintln!(
                     "  {} {}",
                     "✓".green().bold(),
-                    format!("Converted to FLAC: {}", sanitize(&song.name)).green()
+                    format!("Converted to FLAC: {}", fs_util::sanitize(&song.name)).green()
                 );
             }
 
@@ -654,30 +597,6 @@ fn write_metadata_if_needed(
     }
 
     Ok(())
-}
-
-fn sanitize(name: &str) -> String {
-    let illegal = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
-    let result: String = name
-        .chars()
-        .map(|c| if illegal.contains(&c) { ' ' } else { c })
-        .collect();
-    let sanitized = result.trim().trim_matches('.');
-    if sanitized.is_empty() {
-        "untitled".to_string()
-    } else {
-        sanitized.to_string()
-    }
-}
-
-fn ext_from_url(url: &str) -> String {
-    let path = url.split('?').next().unwrap_or(url);
-    let filename = path.rsplit('/').next().unwrap_or(path);
-    if filename.contains('.') {
-        filename.rsplit('.').next().unwrap_or("bin").to_string()
-    } else {
-        "bin".to_string()
-    }
 }
 
 pub async fn download_all(
@@ -861,84 +780,9 @@ fn print_matched_albums(label: &str, albums: &[&crate::models::AlbumBrief]) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::models::SongDetail;
 
-    #[test]
-    fn test_sanitize() {
-        assert_eq!(sanitize("test:file?name"), "test file name");
-        assert_eq!(sanitize("test*file|name"), "test file name");
-        assert_eq!(sanitize("  test file  "), "test file");
-        assert_eq!(sanitize("normal_file.mp3"), "normal_file.mp3");
-        assert_eq!(sanitize("???"), "untitled");
-    }
-
-    #[test]
-    fn test_ext_from_url() {
-        assert_eq!(ext_from_url("https://example.com/file.mp3"), "mp3");
-        assert_eq!(
-            ext_from_url("https://example.com/file.wav?token=123"),
-            "wav"
-        );
-        assert_eq!(ext_from_url("https://example.com/file.flac"), "flac");
-        assert_eq!(ext_from_url("https://example.com/path/noext"), "bin");
-    }
-
-    #[test]
-    fn safe_join_child_rejects_path_escape() {
-        let base = Path::new("album");
-
-        assert!(safe_join_child(base, "../song.mp3").is_err());
-        assert!(safe_join_child(base, "nested/song.mp3").is_err());
-        assert_eq!(
-            safe_join_child(base, "song.mp3").unwrap(),
-            base.join("song.mp3")
-        );
-    }
-
-    #[test]
-    fn validate_song_destinations_rejects_duplicates() {
-        let config = Config::default();
-        let songs = vec![(0, song_detail("1", "same")), (1, song_detail("2", "same"))];
-
-        assert!(validate_song_destinations(&config, Path::new("album"), &songs).is_err());
-    }
-
-    #[test]
-    fn existing_converted_dest_requires_enabled_existing_wav_conversion() {
-        let root = std::env::temp_dir().join(format!(
-            "msr-downloader-flac-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let wav_path = root.join("song.wav");
-        let flac_path = root.join("song.flac");
-        std::fs::write(&flac_path, b"flac").unwrap();
-
-        let mut config = Config::default();
-        let song = song_detail("1", "song");
-        assert!(existing_converted_dest(&config, &wav_path, &song).is_none());
-
-        config.download.convert.enabled = true;
-        config.download.convert.wav_to_flac = true;
-        assert_eq!(
-            existing_converted_dest(&config, &wav_path, &song),
-            Some(flac_path)
-        );
-
-        let mp3_song = SongDetail {
-            source_url: "https://example.com/song.mp3".to_string(),
-            ..song_detail("2", "song")
-        };
-        assert!(existing_converted_dest(&config, &wav_path, &mp3_song).is_none());
-
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
+    #[allow(dead_code)]
     fn song_detail(cid: &str, name: &str) -> SongDetail {
         SongDetail {
             cid: cid.to_string(),

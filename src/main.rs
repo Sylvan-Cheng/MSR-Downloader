@@ -3,6 +3,7 @@ mod cli_progress;
 mod config;
 mod downloader;
 mod format;
+mod fs_util;
 mod metadata;
 mod models;
 mod progress;
