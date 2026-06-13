@@ -19,6 +19,10 @@ msr-downloader
 ### CLI 模式
 
 ```bash
+# 查看帮助和版本
+msr-downloader --help
+msr-downloader --version
+
 # 列出所有专辑
 msr-downloader --cli --list
 
@@ -49,6 +53,8 @@ msr-downloader --clean-parts --dry-run
 # 删除输出目录中的 .part 断点文件
 msr-downloader --clean-parts --yes
 ```
+
+`--cli` 本身不会开始下载。下载全部专辑必须显式传入 `--all`，避免误操作下载完整曲库。
 
 ### TUI 快捷键
 

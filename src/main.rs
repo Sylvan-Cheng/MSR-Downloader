@@ -61,33 +61,51 @@ const COLOR_INFO: Color = Color::Rgb(0, 216, 198);
 const COLOR_MUTED: Color = Color::Rgb(92, 98, 100);
 
 #[derive(Parser)]
-#[command(name = "msr-downloader", about = "Monster Siren Music Downloader")]
+#[command(
+    name = "msr-downloader",
+    version,
+    about = "Monster Siren Music Downloader",
+    after_help = "Examples:\n  msr-downloader\n  msr-downloader --cli --list\n  msr-downloader --cli --album \"相变临界\"\n  msr-downloader --cli --all --output ./music\n  msr-downloader --clean-parts --dry-run\n  msr-downloader --clean-parts --yes"
+)]
 struct Cli {
-    #[arg(short, long)]
+    #[arg(
+        short,
+        long,
+        value_name = "FILE",
+        help = "Path to msr.toml config file"
+    )]
     config: Option<PathBuf>,
-    #[arg(short, long)]
+    #[arg(
+        short,
+        long,
+        value_name = "DIR",
+        help = "Override download output directory"
+    )]
     output: Option<PathBuf>,
-    #[arg(short, long, num_args = 1..)]
+    #[arg(short, long, num_args = 1.., value_name = "NAME", help = "Download albums whose names contain the given text")]
     album: Option<Vec<String>>,
-    #[arg(short, long)]
+    #[arg(short, long, help = "List available albums and exit")]
     list: bool,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Download all albums; required for full-library CLI downloads"
+    )]
     all: bool,
-    #[arg(long)]
+    #[arg(long, help = "Use command-line mode instead of the default TUI")]
     cli: bool,
-    #[arg(long)]
+    #[arg(long, help = "Use plain progress output suitable for logs")]
     plain: bool,
-    #[arg(long)]
+    #[arg(long, help = "Only print final progress summaries")]
     no_progress: bool,
-    #[arg(long)]
+    #[arg(long, value_name = "N", help = "Override concurrent track downloads")]
     concurrency: Option<usize>,
-    #[arg(long)]
+    #[arg(long, help = "Print resolved configuration and exit")]
     print_config: bool,
-    #[arg(long)]
+    #[arg(long, help = "Clean .part files from the output directory")]
     clean_parts: bool,
-    #[arg(long)]
+    #[arg(long, help = "Preview cleanup targets without deleting files")]
     dry_run: bool,
-    #[arg(long)]
+    #[arg(long, help = "Confirm destructive cleanup actions")]
     yes: bool,
 }
 
