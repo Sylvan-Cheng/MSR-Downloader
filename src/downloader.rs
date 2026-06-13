@@ -707,7 +707,8 @@ async fn render_cli_progress(
         return render_summary_only_cli_progress(progress, handle).await;
     }
 
-    if matches!(progress_mode, CliProgressMode::Plain) || !io::stderr().is_terminal() {
+    if matches!(progress_mode, CliProgressMode::Plain) || !io::stderr().is_terminal() || no_color()
+    {
         return render_plain_cli_progress(progress, handle).await;
     }
 
@@ -732,6 +733,10 @@ async fn render_cli_progress(
     }
     eprintln!();
     Ok(())
+}
+
+fn no_color() -> bool {
+    std::env::var_os("NO_COLOR").is_some()
 }
 
 async fn render_summary_only_cli_progress(
@@ -895,7 +900,12 @@ fn print_plain_progress(progress: &DownloadProgress) {
 }
 
 fn print_cli_summary(progress: &DownloadProgress) {
-    let status = if progress.failed_count() > 0 {
+    let has_issues = progress.failed_count() > 0 || !progress.errors.is_empty();
+    let status = if no_color() && has_issues {
+        "MSR// TRANSFER INCOMPLETE".to_string()
+    } else if no_color() {
+        "MSR// TRANSFER SUMMARY".to_string()
+    } else if has_issues {
         "MSR// TRANSFER INCOMPLETE".red().bold().to_string()
     } else {
         "MSR// TRANSFER SUMMARY".cyan().bold().to_string()
