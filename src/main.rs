@@ -1,4 +1,5 @@
 mod api;
+mod cli_progress;
 mod config;
 mod downloader;
 mod format;
@@ -1492,11 +1493,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let cli_progress_mode = if cli.no_progress {
-        downloader::CliProgressMode::Summary
+        cli_progress::CliProgressMode::Summary
     } else if cli.plain {
-        downloader::CliProgressMode::Plain
+        cli_progress::CliProgressMode::Plain
     } else {
-        downloader::CliProgressMode::Auto
+        cli_progress::CliProgressMode::Auto
     };
 
     let performed_download = if let Some(names) = cli.album {
