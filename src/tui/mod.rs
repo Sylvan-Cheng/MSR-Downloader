@@ -1,4 +1,5 @@
 pub(crate) mod chrome;
+pub(crate) mod download;
 pub(crate) mod input;
 pub(crate) mod layout;
 pub(crate) mod overlay;
