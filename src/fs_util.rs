@@ -178,6 +178,72 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn safe_join_child_rejects_dot_dot_components() {
+        assert!(safe_join_child(Path::new("base"), "../escape").is_err());
+        assert!(safe_join_child(Path::new("base"), "foo/../../escape").is_err());
+    }
+
+    #[test]
+    fn safe_join_child_rejects_absolute_paths() {
+        assert!(safe_join_child(Path::new("base"), "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn sanitize_handles_unicode() {
+        assert_eq!(sanitize("歌曲名称"), "歌曲名称");
+        assert_eq!(sanitize("song:name/test"), "song name test");
+    }
+
+    #[test]
+    fn sanitize_preserves_dots_in_middle() {
+        assert_eq!(sanitize("song.name.mp3"), "song.name.mp3");
+        assert_eq!(sanitize(".hidden"), "hidden");
+        assert_eq!(sanitize("..."), "untitled");
+    }
+
+    #[test]
+    fn ext_from_url_handles_complex_paths() {
+        assert_eq!(
+            ext_from_url("https://cdn.example.com/path/to/file.mp3?token=abc&size=100"),
+            "mp3"
+        );
+        assert_eq!(
+            ext_from_url("https://example.com/file.name.with.dots.flac"),
+            "flac"
+        );
+        assert_eq!(ext_from_url("https://example.com/"), "bin");
+    }
+
+    #[test]
+    fn build_song_path_uses_config_template() {
+        let mut config = Config::default();
+        config.naming.song_file = "{song_name}.{ext}".to_string();
+
+        let song = song_detail("1", "Test Song");
+        let path = build_song_path(&config, Path::new("album"), &song).unwrap();
+        assert_eq!(path, Path::new("album").join("Test Song.wav"));
+    }
+
+    #[test]
+    fn build_song_path_sanitizes_song_name() {
+        let config = Config::default();
+        let song = song_detail("1", "Test:Song?Name");
+        let path = build_song_path(&config, Path::new("album"), &song).unwrap();
+        assert!(path.to_string_lossy().contains("Test Song Name"));
+    }
+
+    #[test]
+    fn validate_song_destinations_accepts_unique_paths() {
+        let config = Config::default();
+        let songs = vec![
+            (0, song_detail("1", "Song A")),
+            (1, song_detail("2", "Song B")),
+        ];
+
+        assert!(validate_song_destinations(&config, Path::new("album"), &songs).is_ok());
+    }
+
     fn song_detail(cid: &str, name: &str) -> SongDetail {
         SongDetail {
             cid: cid.to_string(),
