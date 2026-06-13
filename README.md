@@ -4,8 +4,11 @@ Monster Siren Music Downloader - 塞壬唱片音乐下载器
 
 ## 安装
 
+从 GitHub Release 下载对应平台的预编译二进制，或从源码构建：
+
 ```bash
-cargo build --release
+cargo install --path .
+cargo build --release --locked
 ```
 
 ## 使用
@@ -56,6 +59,15 @@ msr-downloader --cli --concurrency 2 --album "相变临界"
 # 查看最终配置
 msr-downloader --print-config
 
+# 生成默认配置文件（默认写入 msr.toml）
+msr-downloader --init-config
+
+# 使用指定路径生成配置，已有文件需加 --yes 覆盖
+msr-downloader --config ./custom.toml --init-config
+
+# 校验配置并输出摘要
+msr-downloader --check-config
+
 # 预览输出目录中的 .part 断点文件
 msr-downloader --clean-parts --dry-run
 
@@ -81,7 +93,14 @@ msr-downloader --clean-parts --yes
 
 ## 配置文件
 
-创建 `msr.toml`：
+生成默认 `msr.toml`：
+
+```bash
+msr-downloader --init-config
+msr-downloader --check-config
+```
+
+手动配置示例：
 
 ```toml
 [api]
@@ -119,6 +138,8 @@ song_file = "{song_name}.{ext}"
 - **状态反馈**：统一显示 `QUE/CHK/GET/RES/TAG/SKP/OK/ERR` 状态
 - **元数据写入**：自动写入 ID3 标签（MP3/WAV）
 - **格式转换**：WAV → FLAC（纯 Rust，无外部依赖）
+
+注意：FLAC 元数据写入当前会明确报告“不支持”，音频文件本身仍会保留。若启用 WAV → FLAC 转换且需要标签，请先保留原 WAV 或后续用专门工具写入 FLAC metadata。
 
 ## 状态码
 
@@ -161,13 +182,30 @@ cargo build --release
 
 ```
 src/
-├── main.rs         # 程序入口
-├── api.rs          # API 客户端
-├── config.rs       # TOML 配置
-├── downloader.rs   # 下载逻辑
-├── metadata.rs     # 元数据写入 + 格式转换
-└── models.rs       # 数据模型
+├── main.rs          # 程序入口、CLI/TUI 事件循环
+├── api.rs           # API JSON 适配器和 MusicSource trait
+├── cli_progress.rs  # CLI 进度渲染
+├── config.rs        # TOML 配置
+├── downloader.rs    # 下载编排
+├── file_fetcher.rs  # 文件下载、重试、断点续传
+├── format.rs        # 进度格式化工具
+├── fs_util.rs       # 文件名/path 安全工具
+├── metadata.rs      # 元数据写入 + 格式转换
+├── models.rs        # 数据模型
+└── progress.rs      # 下载进度状态
 ```
+
+## 发布 workflow
+
+Release binary workflow 只支持手动触发，不会在 push 或 release 事件自动运行。发布步骤：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+gh workflow run "Release Binaries" -f tag=v0.1.0
+```
+
+workflow 会在 Windows 和 Linux 上运行 `cargo test --locked` 与 `cargo build --release --locked`，然后把二进制上传到对应 tag 的 GitHub Release。
 
 ## 依赖
 
@@ -181,6 +219,7 @@ src/
 | toml | TOML 配置解析 |
 | clap | 命令行参数 |
 | anyhow | 错误处理 |
+| async-trait | async trait seam，用于下载编排测试 |
 | ratatui | TUI 框架 |
 | crossterm | 终端控制 |
 | owo-colors | 终端颜色 |
