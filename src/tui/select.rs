@@ -166,12 +166,16 @@ pub(crate) fn draw_select_screen(
         .collect();
 
     if queue_items.is_empty() {
-        let empty_queue = Paragraph::new(Line::from(vec![
-            Span::styled("SPACE", Style::default().fg(COLOR_PRIMARY)),
-            Span::raw(" TO ADD AN ALBUM\n"),
-            Span::styled("ENTER", Style::default().fg(COLOR_PRIMARY)),
-            Span::raw(" TO START WHEN READY"),
-        ]))
+        let empty_queue = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("SPACE/CLICK", Style::default().fg(COLOR_PRIMARY)),
+                Span::raw(" TO ADD AN ALBUM"),
+            ]),
+            Line::from(vec![
+                Span::styled("ENTER", Style::default().fg(COLOR_PRIMARY)),
+                Span::raw(" TO START WHEN READY"),
+            ]),
+        ])
         .style(Style::default().fg(COLOR_MUTED))
         .block(create_block("DOWNLOAD QUEUE", COLOR_MUTED));
         f.render_widget(empty_queue, body[1]);

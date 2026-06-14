@@ -605,8 +605,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                             mouse.row,
                                         ) {
                                             let index = match action {
-                                                AlbumMouseAction::Focus(index)
-                                                | AlbumMouseAction::Toggle(index) => index,
+                                                AlbumMouseAction::Toggle(index) => index,
                                             };
                                             if let Some(&album_index) = visible_indices.get(index) {
                                                 state.selected = album_index;
@@ -895,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn album_mouse_action_distinguishes_focus_and_toggle() {
+    fn album_mouse_action_toggles_clicked_album_row() {
         let list_area = Rect::new(0, 3, 64, 20);
 
         assert_eq!(
@@ -904,7 +903,7 @@ mod tests {
         );
         assert_eq!(
             album_mouse_action(0, 10, list_area, 6, 4),
-            Some(AlbumMouseAction::Focus(0))
+            Some(AlbumMouseAction::Toggle(0))
         );
         assert_eq!(album_mouse_action(0, 10, list_area, 70, 4), None);
     }

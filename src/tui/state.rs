@@ -16,7 +16,6 @@ pub(crate) enum HelpOverlay {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AlbumMouseAction {
-    Focus(usize),
     Toggle(usize),
 }
 

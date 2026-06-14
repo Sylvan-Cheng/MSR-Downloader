@@ -62,9 +62,5 @@ pub(crate) fn album_mouse_action(
         return None;
     }
 
-    if mouse_x <= content_left + 1 {
-        Some(AlbumMouseAction::Toggle(index))
-    } else {
-        Some(AlbumMouseAction::Focus(index))
-    }
+    Some(AlbumMouseAction::Toggle(index))
 }
