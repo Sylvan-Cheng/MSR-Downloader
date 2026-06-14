@@ -30,3 +30,6 @@ MSR_Albums/
 
 # Playwright MCP runtime output
 .playwright-mcp/
+
+# Graphify
+graphify-out
