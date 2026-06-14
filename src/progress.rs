@@ -1,5 +1,54 @@
 use serde::Serialize;
+use std::sync::Arc;
 use std::time::Instant;
+
+/// Trait for receiving download events.
+///
+/// Implementors decide how to deliver events (channel, callback, log, etc.).
+/// The downloader calls [`EventSink::emit`] for every state change.
+pub trait EventSink: Send + Sync {
+    fn emit(&self, event: DownloadEvent);
+}
+
+/// Wrapper that disables event delivery when no sink is configured.
+/// Used internally so callers never need to match on `Option` to emit.
+#[derive(Clone)]
+pub(crate) struct MaybeEventSink(Option<Arc<dyn EventSink>>);
+
+impl MaybeEventSink {
+    pub(crate) fn none() -> Self {
+        Self(None)
+    }
+
+    pub(crate) fn new(sink: Option<Arc<dyn EventSink>>) -> Self {
+        Self(sink)
+    }
+
+    /// Emit an event. No-op if no sink is configured.
+    /// Send failures are silently ignored — events are best-effort;
+    /// the receiving end disconnecting (e.g. a closed Tauri window) must
+    /// not abort the download.
+    pub(crate) fn emit(&self, event: DownloadEvent) {
+        if let Some(ref sink) = self.0 {
+            sink.emit(event);
+        }
+    }
+}
+
+/// Blanket impl: any `Fn(DownloadEvent) + Send + Sync` is an `EventSink`.
+impl<F: Fn(DownloadEvent) + Send + Sync> EventSink for F {
+    fn emit(&self, event: DownloadEvent) {
+        (self)(event);
+    }
+}
+
+/// `EventSink` backed by a Tokio unbounded channel.
+/// Kept for backward-compatibility with tests and internal callers.
+impl EventSink for tokio::sync::mpsc::UnboundedSender<DownloadEvent> {
+    fn emit(&self, event: DownloadEvent) {
+        let _ = self.send(event);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +86,12 @@ impl DownloadIssueKind {
         }
     }
 
+    /// Whether this issue kind belongs to track-level failure reporting.
+    ///
+    /// `Audio` remains track-related so summaries can separate it from
+    /// auxiliary issues. `AlbumDownloadReport::track_failure_count` deliberately
+    /// does not add audio issues on top of failed tracks, because audio errors
+    /// already mark the corresponding track as `SongStatus::Failed`.
     pub fn is_track_failure(self) -> bool {
         matches!(self, Self::Audio | Self::Task)
     }
@@ -209,6 +264,12 @@ impl AlbumDownloadReport {
             .count()
     }
 
+    /// Total number of track-level failures.
+    ///
+    /// Counts tracks with `SongStatus::Failed` plus `Task` issues (which have
+    /// no corresponding track entry). `Audio` issues are **not** added because
+    /// the downloader already marks the track as `Failed` on audio errors —
+    /// adding them here would double-count.
     pub fn track_failure_count(&self) -> usize {
         let task_issues = self
             .issues
@@ -321,6 +382,18 @@ impl DownloadProgress {
     }
 }
 
+/// Events emitted during a download.
+///
+/// Ordering guarantees (when delivered through [`EventSink`]):
+/// - The first event is always `AlbumStarted`.
+/// - The last event is always `AlbumFinished` or `AlbumFailed` (never both).
+/// - `TrackQueued` events arrive before the corresponding `TrackProgress`.
+/// - `TrackFinished` arrives exactly once for each track task that reaches a
+///   terminal state. Album-level failures during preflight can end the stream
+///   before queued tracks start downloading.
+/// - `Issue` events may be interleaved at any point.
+///
+/// All events use `#[serde(rename_all = "camelCase")]` for JS-friendly JSON.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum DownloadEvent {

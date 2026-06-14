@@ -5,12 +5,37 @@ use crate::metadata;
 use crate::models::{AlbumDetail, SongDetail};
 use crate::progress::{
     AlbumDownloadReport, DownloadEvent, DownloadIssue, DownloadIssueKind, DownloadProgress,
-    SongStatus,
+    EventSink, MaybeEventSink, SongStatus,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::{mpsc, Semaphore};
+
+/// Internal context shared across download helpers.
+///
+/// Bundles the optional progress handle (for CLI rendering) and the optional
+/// event sink (for Tauri / event-driven consumers) so that every helper does
+/// not need to accept them as separate parameters.
+#[derive(Clone)]
+struct DownloadContext {
+    progress: Option<Arc<Mutex<DownloadProgress>>>,
+    sink: MaybeEventSink,
+}
+
+impl DownloadContext {
+    fn new(progress: Option<Arc<Mutex<DownloadProgress>>>, sink: MaybeEventSink) -> Self {
+        Self { progress, sink }
+    }
+
+    fn with_progress(progress: Option<Arc<Mutex<DownloadProgress>>>) -> Self {
+        Self {
+            progress,
+            sink: MaybeEventSink::none(),
+        }
+    }
+}
+
+use tokio::sync::Semaphore;
 
 struct SongDownloadJob {
     album_path: PathBuf,
@@ -20,8 +45,7 @@ struct SongDownloadJob {
     current: usize,
     total: usize,
     cover_data: Option<Vec<u8>>,
-    progress: Option<Arc<Mutex<DownloadProgress>>>,
-    event_sender: Option<mpsc::UnboundedSender<DownloadEvent>>,
+    ctx: DownloadContext,
 }
 
 struct MetadataWrite<'a> {
@@ -32,8 +56,7 @@ struct MetadataWrite<'a> {
     cover_data: Option<&'a [u8]>,
     lyrics_text: Option<String>,
     downloaded: bool,
-    progress: &'a Option<Arc<Mutex<DownloadProgress>>>,
-    event_sender: &'a Option<mpsc::UnboundedSender<DownloadEvent>>,
+    ctx: &'a DownloadContext,
 }
 
 pub async fn download_album_with_progress<A: MusicSource>(
@@ -48,51 +71,42 @@ pub async fn download_album_with_progress<A: MusicSource>(
             album.songs.len(),
         )))
     });
-    let progress = Some(progress);
-    download_album_inner(api, album, config, &progress, &None).await
+    let ctx = DownloadContext::with_progress(Some(progress));
+    download_album_inner(api, album, config, &ctx).await
 }
 
 pub async fn download_album_with_events<A: MusicSource>(
     api: &A,
     album: &AlbumDetail,
     config: &Config,
-    event_sender: mpsc::UnboundedSender<DownloadEvent>,
+    sink: impl EventSink + 'static,
 ) -> anyhow::Result<AlbumDownloadReport> {
-    download_album_inner(api, album, config, &None, &Some(event_sender)).await
+    let ctx = DownloadContext::new(None, MaybeEventSink::new(Some(Arc::new(sink))));
+    download_album_inner(api, album, config, &ctx).await
 }
 
 async fn download_album_inner<A: MusicSource>(
     api: &A,
     album: &AlbumDetail,
     config: &Config,
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
-    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
+    ctx: &DownloadContext,
 ) -> anyhow::Result<AlbumDownloadReport> {
-    emit_event(
-        event_sender,
-        DownloadEvent::AlbumStarted {
-            album_name: album.name.clone(),
-            total_tracks: album.songs.len(),
-        },
-    );
+    ctx.sink.emit(DownloadEvent::AlbumStarted {
+        album_name: album.name.clone(),
+        total_tracks: album.songs.len(),
+    });
 
-    match download_album_body(api, album, config, progress, event_sender).await {
+    match download_album_body(api, album, config, ctx).await {
         Ok(report) => {
-            emit_event(
-                event_sender,
-                DownloadEvent::AlbumFinished {
-                    report: report.clone(),
-                },
-            );
+            ctx.sink.emit(DownloadEvent::AlbumFinished {
+                report: report.clone(),
+            });
             Ok(report)
         }
         Err(e) => {
-            emit_event(
-                event_sender,
-                DownloadEvent::AlbumFailed {
-                    error: e.to_string(),
-                },
-            );
+            ctx.sink.emit(DownloadEvent::AlbumFailed {
+                error: e.to_string(),
+            });
             Err(e)
         }
     }
@@ -102,16 +116,15 @@ async fn download_album_body<A: MusicSource>(
     api: &A,
     album: &AlbumDetail,
     config: &Config,
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
-    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
+    ctx: &DownloadContext,
 ) -> anyhow::Result<AlbumDownloadReport> {
-    let progress = progress.clone().unwrap_or_else(|| {
+    let progress = ctx.progress.clone().unwrap_or_else(|| {
         Arc::new(Mutex::new(DownloadProgress::new(
             &album.name,
             album.songs.len(),
         )))
     });
-    let progress = Some(progress);
+    let ctx = DownloadContext::new(Some(progress), ctx.sink.clone());
 
     let album_path = create_album_path(config, album)?;
 
@@ -120,7 +133,7 @@ async fn download_album_body<A: MusicSource>(
     }
 
     let cover_data = if config.download.include.covers {
-        download_covers(api, &album_path, album, &progress, event_sender).await?
+        download_covers(api, &album_path, album, &ctx).await?
     } else {
         None
     };
@@ -132,14 +145,16 @@ async fn download_album_body<A: MusicSource>(
     let mut song_details = Vec::with_capacity(total);
     for (idx, song_brief) in album.songs.iter().enumerate() {
         let song_detail = api.get_song(&song_brief.cid).await?;
-        set_progress_status(&progress, idx + 1, &song_detail.name, SongStatus::Queued);
-        emit_event(
-            event_sender,
-            DownloadEvent::TrackQueued {
-                index: idx + 1,
-                name: song_detail.name.clone(),
-            },
+        set_progress_status(
+            &ctx.progress,
+            idx + 1,
+            &song_detail.name,
+            SongStatus::Queued,
         );
+        ctx.sink.emit(DownloadEvent::TrackQueued {
+            index: idx + 1,
+            name: song_detail.name.clone(),
+        });
         song_details.push((idx, song_detail));
     }
 
@@ -152,10 +167,9 @@ async fn download_album_body<A: MusicSource>(
         let album_path_clone = album_path.clone();
         let config_clone = config.clone();
         let cover_data_clone = cover_data.clone();
-        let progress_clone = progress.clone();
         let semaphore_clone = semaphore.clone();
         let album_clone = album.clone();
-        let event_sender_clone = event_sender.clone();
+        let ctx_clone = ctx.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = semaphore_clone.acquire().await.unwrap();
@@ -170,8 +184,7 @@ async fn download_album_body<A: MusicSource>(
                     current: idx + 1,
                     total,
                     cover_data: cover_data_clone,
-                    progress: progress_clone,
-                    event_sender: event_sender_clone,
+                    ctx: ctx_clone,
                 },
             )
             .await
@@ -186,30 +199,22 @@ async fn download_album_body<A: MusicSource>(
                 if let Err(e) = result {
                     let message = format!("Download error: {}", e);
                     push_issue(
-                        &progress,
-                        event_sender,
-                        DownloadIssue::new(DownloadIssueKind::Audio, "", message.clone()),
+                        &ctx,
+                        DownloadIssue::new(DownloadIssueKind::Audio, "", message),
                     );
                 }
             }
             Err(e) => {
                 let message = format!("Task error: {}", e);
                 push_issue(
-                    &progress,
-                    event_sender,
-                    DownloadIssue::new(DownloadIssueKind::Task, "", message.clone()),
+                    &ctx,
+                    DownloadIssue::new(DownloadIssueKind::Task, "", message),
                 );
             }
         }
     }
 
-    Ok(report_from_progress(&progress, album))
-}
-
-fn emit_event(sender: &Option<mpsc::UnboundedSender<DownloadEvent>>, event: DownloadEvent) {
-    if let Some(tx) = sender {
-        let _ = tx.send(event);
-    }
+    Ok(report_from_progress(&ctx.progress, album))
 }
 
 fn report_from_progress(
@@ -243,14 +248,13 @@ fn create_album_path(config: &Config, album: &AlbumDetail) -> anyhow::Result<Pat
 }
 
 fn update_progress(
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
-    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
+    ctx: &DownloadContext,
     current_song: usize,
     song_name: &str,
     file_progress: FileProgress,
 ) {
     let mut speed_bps = 0.0;
-    if let Some(ref p) = progress {
+    if let Some(ref p) = ctx.progress {
         if let Ok(mut prog) = p.lock() {
             let now = Instant::now();
             let status = if file_progress.resumed {
@@ -283,17 +287,14 @@ fn update_progress(
         }
     }
 
-    emit_event(
-        event_sender,
-        DownloadEvent::TrackProgress {
-            index: current_song,
-            name: song_name.to_string(),
-            downloaded: file_progress.downloaded,
-            total: file_progress.total,
-            speed_bps,
-            resumed: file_progress.resumed,
-        },
-    );
+    ctx.sink.emit(DownloadEvent::TrackProgress {
+        index: current_song,
+        name: song_name.to_string(),
+        downloaded: file_progress.downloaded,
+        total: file_progress.total,
+        speed_bps,
+        resumed: file_progress.resumed,
+    });
 }
 
 fn set_progress_status(
@@ -310,8 +311,7 @@ fn set_progress_status(
 }
 
 fn finish_progress(
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
-    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
+    ctx: &DownloadContext,
     current_song: usize,
     song_name: &str,
     skipped: bool,
@@ -325,7 +325,7 @@ fn finish_progress(
         SongStatus::Done
     };
 
-    if let Some(ref p) = progress {
+    if let Some(ref p) = ctx.progress {
         if let Ok(mut prog) = p.lock() {
             let mut counted = false;
             if let Some(task) = prog
@@ -344,31 +344,21 @@ fn finish_progress(
         }
     }
 
-    emit_event(
-        event_sender,
-        DownloadEvent::TrackFinished {
-            index: current_song,
-            name: song_name.to_string(),
-            status,
-        },
-    );
+    ctx.sink.emit(DownloadEvent::TrackFinished {
+        index: current_song,
+        name: song_name.to_string(),
+        status,
+    });
 }
 
-fn push_issue(
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
-    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
-    issue: DownloadIssue,
-) {
-    let message = issue.summary();
-    if let Some(ref p) = progress {
+fn push_issue(ctx: &DownloadContext, issue: DownloadIssue) {
+    if let Some(ref p) = ctx.progress {
         if let Ok(mut prog) = p.lock() {
             prog.push_issue(issue.clone());
         }
-    } else {
-        eprintln!("  ERR {}", message);
     }
 
-    emit_event(event_sender, DownloadEvent::Issue { issue });
+    ctx.sink.emit(DownloadEvent::Issue { issue });
 }
 
 fn save_album_info(path: &Path, album: &AlbumDetail) -> anyhow::Result<()> {
@@ -394,8 +384,7 @@ async fn download_covers<A: MusicSource>(
     api: &A,
     path: &Path,
     album: &AlbumDetail,
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
-    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
+    ctx: &DownloadContext,
 ) -> anyhow::Result<Option<Vec<u8>>> {
     let album_name = fs_util::sanitize(&album.name);
     let mut cover_data: Option<Vec<u8>> = None;
@@ -409,8 +398,7 @@ async fn download_covers<A: MusicSource>(
         DownloadIssueKind::Cover,
         album.name.as_str(),
         "Failed to download cover",
-        progress,
-        event_sender,
+        ctx,
     )
     .await;
 
@@ -427,14 +415,15 @@ async fn download_covers<A: MusicSource>(
         DownloadIssueKind::Cover,
         album.name.as_str(),
         "Failed to download alternate cover",
-        progress,
-        event_sender,
+        ctx,
     )
     .await;
 
     Ok(cover_data)
 }
 
+/// Download a non-critical file (cover, lyrics). Errors are recorded as
+/// issues rather than propagated — a missing cover should not abort the album.
 async fn download_optional_file<A: MusicSource>(
     api: &A,
     url: &str,
@@ -442,8 +431,7 @@ async fn download_optional_file<A: MusicSource>(
     kind: DownloadIssueKind,
     item: &str,
     context: &str,
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
-    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
+    ctx: &DownloadContext,
 ) {
     if dest.exists() {
         return;
@@ -451,8 +439,7 @@ async fn download_optional_file<A: MusicSource>(
 
     if let Err(e) = api.download_file(url, dest).await {
         push_issue(
-            progress,
-            event_sender,
+            ctx,
             DownloadIssue::new(kind, item, format!("{}: {}", context, e)),
         );
     }
@@ -470,30 +457,28 @@ async fn download_song_with_progress<A: MusicSource>(
         current,
         total,
         cover_data,
-        progress,
-        event_sender,
+        ctx,
     } = job;
 
     let dest = fs_util::build_song_path(&config, &album_path, &song)?;
     let existing_converted_dest = fs_util::existing_converted_dest(&config, &dest, &song);
 
     let downloaded = if let Some(final_dest) = existing_converted_dest.as_deref() {
-        skip_existing_converted_file(final_dest, &song, current, &progress, &event_sender);
+        skip_existing_converted_file(final_dest, &song, current, &ctx);
         false
     } else {
-        download_audio_file(api, &song, &dest, current, total, &progress, &event_sender).await?
+        download_audio_file(api, &song, &dest, current, total, &ctx).await?
     };
 
-    let lyrics_text =
-        download_lyrics(api, &config, &album_path, &song, &progress, &event_sender).await?;
+    let lyrics_text = download_lyrics(api, &config, &album_path, &song, &ctx).await?;
 
     let final_dest = match existing_converted_dest {
         Some(path) => path,
-        None => convert_if_needed(&config, &dest, &song, &progress, &event_sender)?,
+        None => convert_if_needed(&config, &dest, &song, &ctx)?,
     };
 
     if downloaded {
-        set_progress_status(&progress, current, &song.name, SongStatus::Tagging);
+        set_progress_status(&ctx.progress, current, &song.name, SongStatus::Tagging);
     }
 
     write_metadata_if_needed(MetadataWrite {
@@ -504,12 +489,11 @@ async fn download_song_with_progress<A: MusicSource>(
         cover_data: cover_data.as_deref(),
         lyrics_text,
         downloaded,
-        progress: &progress,
-        event_sender: &event_sender,
+        ctx: &ctx,
     })?;
 
     if downloaded {
-        finish_progress(&progress, &event_sender, current, &song.name, false, false);
+        finish_progress(&ctx, current, &song.name, false, false);
     }
 
     Ok(())
@@ -519,16 +503,14 @@ fn skip_existing_converted_file(
     final_dest: &Path,
     song: &SongDetail,
     current: usize,
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
-    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
+    ctx: &DownloadContext,
 ) {
     let size = final_dest
         .metadata()
         .map(|metadata| metadata.len())
         .unwrap_or(1);
     update_progress(
-        progress,
-        event_sender,
+        ctx,
         current,
         &song.name,
         FileProgress {
@@ -539,7 +521,7 @@ fn skip_existing_converted_file(
             attempt: 0,
         },
     );
-    finish_progress(progress, event_sender, current, &song.name, true, false);
+    finish_progress(ctx, current, &song.name, true, false);
 }
 
 async fn download_audio_file<A: MusicSource>(
@@ -547,18 +529,16 @@ async fn download_audio_file<A: MusicSource>(
     song: &SongDetail,
     dest: &Path,
     current: usize,
-    total: usize,
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
-    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
+    _total: usize,
+    ctx: &DownloadContext,
 ) -> anyhow::Result<bool> {
-    set_progress_status(progress, current, &song.name, SongStatus::Checking);
+    set_progress_status(&ctx.progress, current, &song.name, SongStatus::Checking);
 
     if dest.exists() {
         if existing_file_is_complete(api, song, dest).await? {
             let size = dest.metadata().map(|metadata| metadata.len()).unwrap_or(1);
             update_progress(
-                progress,
-                event_sender,
+                ctx,
                 current,
                 &song.name,
                 FileProgress {
@@ -569,7 +549,7 @@ async fn download_audio_file<A: MusicSource>(
                     attempt: 0,
                 },
             );
-            finish_progress(progress, event_sender, current, &song.name, true, false);
+            finish_progress(ctx, current, &song.name, true, false);
             return Ok(false);
         }
 
@@ -577,18 +557,11 @@ async fn download_audio_file<A: MusicSource>(
     }
 
     let song_name = song.name.clone();
-    set_progress_status(progress, current, &song_name, SongStatus::Getting);
+    set_progress_status(&ctx.progress, current, &song_name, SongStatus::Getting);
 
-    let progress_clone = progress.clone();
-    let event_sender_clone = event_sender.clone();
+    let ctx_clone = ctx.clone();
     let mut on_progress = move |file_progress| {
-        update_progress(
-            &progress_clone,
-            &event_sender_clone,
-            current,
-            &song_name,
-            file_progress,
-        );
+        update_progress(&ctx_clone, current, &song_name, file_progress);
     };
     let result = api
         .download_file_with_progress(&song.source_url, dest, &mut on_progress)
@@ -597,8 +570,7 @@ async fn download_audio_file<A: MusicSource>(
     match result {
         Ok(_) => Ok(true),
         Err(e) => {
-            let _ = total;
-            finish_progress(progress, event_sender, current, &song.name, false, true);
+            finish_progress(ctx, current, &song.name, false, true);
             Err(e)
         }
     }
@@ -617,13 +589,7 @@ async fn existing_file_is_complete<A: MusicSource>(
     match api.content_length(&song.source_url).await {
         Ok(Some(remote_size)) => Ok(local_size == remote_size),
         Ok(None) => Ok(false),
-        Err(e) => {
-            eprintln!(
-                "  CHK Could not verify existing file for {}; re-downloading: {}",
-                song.name, e
-            );
-            Ok(false)
-        }
+        Err(_) => Ok(false),
     }
 }
 
@@ -632,8 +598,7 @@ async fn download_lyrics<A: MusicSource>(
     config: &Config,
     path: &Path,
     song: &SongDetail,
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
-    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
+    ctx: &DownloadContext,
 ) -> anyhow::Result<Option<String>> {
     if !config.download.include.lyrics {
         return Ok(None);
@@ -655,8 +620,7 @@ async fn download_lyrics<A: MusicSource>(
         DownloadIssueKind::Lyrics,
         song.name.as_str(),
         "Failed to download lyrics",
-        progress,
-        event_sender,
+        ctx,
     )
     .await;
 
@@ -666,8 +630,7 @@ async fn download_lyrics<A: MusicSource>(
             Err(e) => {
                 let message = format!("Could not read lyrics for {}: {}", song.name, e);
                 push_issue(
-                    progress,
-                    event_sender,
+                    ctx,
                     DownloadIssue::new(DownloadIssueKind::Lyrics, song.name.as_str(), message),
                 );
                 Ok(None)
@@ -682,8 +645,7 @@ fn convert_if_needed(
     config: &Config,
     dest: &Path,
     song: &SongDetail,
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
-    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
+    ctx: &DownloadContext,
 ) -> anyhow::Result<PathBuf> {
     if !config.download.convert.enabled || !config.download.convert.wav_to_flac || !dest.exists() {
         return Ok(dest.to_path_buf());
@@ -705,10 +667,6 @@ fn convert_if_needed(
     match metadata::convert_wav_to_flac(dest, &flac_path, config.download.convert.flac_compression)
     {
         Ok(_) => {
-            if progress.is_none() {
-                eprintln!("  OK Converted to FLAC: {}", fs_util::sanitize(&song.name));
-            }
-
             if config.download.convert.delete_original {
                 std::fs::remove_file(dest)?;
             }
@@ -717,8 +675,7 @@ fn convert_if_needed(
         Err(e) => {
             let message = format!("Failed to convert {} to FLAC: {}", song.name, e);
             push_issue(
-                progress,
-                event_sender,
+                ctx,
                 DownloadIssue::new(DownloadIssueKind::Audio, song.name.as_str(), message),
             );
             Ok(dest.to_path_buf())
@@ -735,8 +692,7 @@ fn write_metadata_if_needed(args: MetadataWrite<'_>) -> anyhow::Result<()> {
         cover_data,
         lyrics_text,
         downloaded,
-        progress,
-        event_sender,
+        ctx,
     } = args;
 
     if !config.download.include.metadata || (!downloaded && dest.exists()) {
@@ -767,8 +723,7 @@ fn write_metadata_if_needed(args: MetadataWrite<'_>) -> anyhow::Result<()> {
     ) {
         let message = format!("Failed to write metadata for {}: {}", song.name, e);
         push_issue(
-            progress,
-            event_sender,
+            ctx,
             DownloadIssue::new(DownloadIssueKind::Metadata, song.name.as_str(), message),
         );
     }
@@ -784,6 +739,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::{HashMap, HashSet};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::mpsc;
 
     #[derive(Clone, Default)]
     struct MockSource {

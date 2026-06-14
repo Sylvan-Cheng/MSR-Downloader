@@ -1,9 +1,9 @@
+mod cli;
 mod cli_progress;
 mod cli_style;
 mod tui;
 
 use msr_downloader::api::ApiClient;
-use msr_downloader::api::MusicSource;
 use msr_downloader::config::Config;
 use msr_downloader::downloader;
 use msr_downloader::models;
@@ -26,7 +26,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 use tui::download::{current_transfer_index, draw_download_screen};
@@ -50,507 +50,6 @@ impl Drop for TerminalGuard {
             DisableMouseCapture,
             cursor::Show
         );
-    }
-}
-
-#[derive(Parser)]
-#[command(
-    name = "msr-downloader",
-    version,
-    about = "Monster Siren Music Downloader",
-    after_help = "Examples:\n  msr-downloader\n  msr-downloader --init-config\n  msr-downloader --check-config\n  msr-downloader --cli --list\n  msr-downloader --cli --album \"春弦\"\n  msr-downloader --cli --album \"春弦\" --exact --dry-run\n  msr-downloader --cli --album-id 123456\n  msr-downloader --cli --all --dry-run\n  msr-downloader --cli --all --output ./music\n  msr-downloader --clean-parts --dry-run\n  msr-downloader --clean-parts --yes"
-)]
-struct Cli {
-    #[arg(
-        short,
-        long,
-        value_name = "FILE",
-        help_heading = "Config",
-        help = "Path to msr.toml config file"
-    )]
-    config: Option<PathBuf>,
-    #[arg(
-        short,
-        long,
-        value_name = "DIR",
-        help_heading = "Download",
-        help = "Override download output directory"
-    )]
-    output: Option<PathBuf>,
-    #[arg(short, long, num_args = 1.., value_name = "NAME", help_heading = "Download", help = "Download albums whose names contain the given text")]
-    album: Option<Vec<String>>,
-    #[arg(long, num_args = 1.., value_name = "CID", help_heading = "Download", help = "Download albums by exact album CID from --list")]
-    album_id: Option<Vec<String>>,
-    #[arg(
-        long,
-        help_heading = "Download",
-        help = "Require --album to match album names exactly"
-    )]
-    exact: bool,
-    #[arg(
-        short,
-        long,
-        help_heading = "Download",
-        help = "List available albums and exit"
-    )]
-    list: bool,
-    #[arg(
-        long,
-        help_heading = "Download",
-        help = "Download all albums; required for full-library CLI downloads"
-    )]
-    all: bool,
-    #[arg(
-        long,
-        help_heading = "General",
-        help = "Use command-line mode instead of the default TUI"
-    )]
-    cli: bool,
-    #[arg(
-        long,
-        help_heading = "Output",
-        help = "Print periodic line-based progress; no cursor control"
-    )]
-    plain: bool,
-    #[arg(
-        long,
-        help_heading = "Output",
-        help = "Suppress progress updates; print final summaries only"
-    )]
-    no_progress: bool,
-    #[arg(
-        long,
-        value_name = "N",
-        help_heading = "Download",
-        help = "Override concurrent track downloads"
-    )]
-    concurrency: Option<usize>,
-    #[arg(
-        long,
-        help_heading = "Config",
-        help = "Print resolved configuration and exit"
-    )]
-    print_config: bool,
-    #[arg(
-        long,
-        help_heading = "Config",
-        help = "Create a sample config file at --config path or msr.toml"
-    )]
-    init_config: bool,
-    #[arg(
-        long,
-        help_heading = "Config",
-        help = "Validate resolved configuration and exit"
-    )]
-    check_config: bool,
-    #[arg(
-        long,
-        help_heading = "Maintenance",
-        help = "Clean .part files from the output directory"
-    )]
-    clean_parts: bool,
-    #[arg(
-        long,
-        help_heading = "Maintenance",
-        help = "Preview cleanup targets or matched downloads without changing files"
-    )]
-    dry_run: bool,
-    #[arg(
-        long,
-        help_heading = "Maintenance",
-        help = "Confirm destructive cleanup actions"
-    )]
-    yes: bool,
-}
-
-enum CleanPartsResult {
-    DryRun(usize),
-    Removed(usize),
-}
-
-fn print_config_summary(config: &Config) {
-    println!("{} CONFIG", cli_style::msr());
-    println!("  api.base_url = {}", config.api.base_url);
-    println!("  api.timeout = {}", config.api.timeout);
-    println!(
-        "  download.output_dir = {}",
-        config.download.output_dir.display()
-    );
-    println!("  download.concurrency = {}", config.download.concurrency);
-    println!("  include.lyrics = {}", config.download.include.lyrics);
-    println!("  include.covers = {}", config.download.include.covers);
-    println!(
-        "  include.album_info = {}",
-        config.download.include.album_info
-    );
-    println!("  include.metadata = {}", config.download.include.metadata);
-    println!("  convert.enabled = {}", config.download.convert.enabled);
-    println!(
-        "  convert.wav_to_flac = {}",
-        config.download.convert.wav_to_flac
-    );
-    println!(
-        "  convert.delete_original = {}",
-        config.download.convert.delete_original
-    );
-    println!(
-        "  convert.flac_compression = {}",
-        config.download.convert.flac_compression
-    );
-    println!("  naming.album_folder = {}", config.naming.album_folder);
-    println!("  naming.song_file = {}", config.naming.song_file);
-}
-
-fn default_config_toml() -> &'static str {
-    r#"[api]
-base_url = "https://monster-siren.hypergryph.com/api"
-timeout = 30
-
-[download]
-output_dir = "./MSR_Albums"
-concurrency = 2
-
-[download.include]
-lyrics = true
-covers = true
-album_info = true
-metadata = true
-
-[download.convert]
-enabled = true
-wav_to_flac = true
-delete_original = true
-flac_compression = 5
-
-[naming]
-album_folder = "{album_name}"
-song_file = "{song_name}.{ext}"
-"#
-}
-
-fn init_config_file(path: &Path, overwrite: bool) -> anyhow::Result<()> {
-    if path.exists() && !overwrite {
-        anyhow::bail!(
-            "refusing to overwrite existing config {}; pass --yes to overwrite",
-            path.display()
-        );
-    }
-
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    std::fs::write(path, default_config_toml())?;
-    Ok(())
-}
-
-fn collect_partial_files(dir: &std::path::Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> {
-    if !dir.try_exists()? {
-        return Ok(());
-    }
-
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-
-        if metadata.is_dir() {
-            collect_partial_files(&path, files)?;
-        } else if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".part") || name.ends_with(".part.meta"))
-        {
-            files.push(path);
-        }
-    }
-    Ok(())
-}
-
-fn clean_partial_files(
-    dir: &std::path::Path,
-    dry_run: bool,
-    yes: bool,
-) -> anyhow::Result<CleanPartsResult> {
-    let mut partial_files = Vec::new();
-    collect_partial_files(dir, &mut partial_files)?;
-
-    println!(
-        "{} SCANNED {} / {} PARTIAL FILE{} FOUND",
-        cli_style::msr(),
-        dir.display(),
-        partial_files.len(),
-        if partial_files.len() == 1 { "" } else { "S" }
-    );
-
-    if dry_run {
-        for file in &partial_files {
-            println!("  {}", file.display());
-        }
-        return Ok(CleanPartsResult::DryRun(partial_files.len()));
-    }
-
-    if !partial_files.is_empty() && !yes {
-        anyhow::bail!("refusing to delete partial files without --yes; use --dry-run to preview");
-    }
-
-    for file in &partial_files {
-        std::fs::remove_file(file)?;
-    }
-    Ok(CleanPartsResult::Removed(partial_files.len()))
-}
-
-fn no_cli_action_error() -> anyhow::Error {
-    anyhow::anyhow!(
-        "no CLI action selected.\nTry:\n  msr-downloader --cli --list\n  msr-downloader --cli --album \"春弦\" --dry-run\n  msr-downloader --cli --all"
-    )
-}
-
-fn validate_cli_action(cli: &Cli) -> anyhow::Result<()> {
-    if cli.album.is_some() && cli.album_id.is_some() {
-        anyhow::bail!("use either --album or --album-id, not both");
-    }
-
-    if cli.cli && !cli.list && !cli.all && cli.album.is_none() && cli.album_id.is_none() {
-        return Err(no_cli_action_error());
-    }
-
-    Ok(())
-}
-
-async fn download_album<A: MusicSource>(
-    api: &A,
-    album: &models::AlbumDetail,
-    config: &Config,
-    progress_mode: cli_progress::CliProgressMode,
-) -> anyhow::Result<()> {
-    let progress = Arc::new(Mutex::new(DownloadProgress::new(
-        &album.name,
-        album.songs.len(),
-    )));
-    let progress_clone = progress.clone();
-    let download = tokio::spawn({
-        let api = api.clone();
-        let album = album.clone();
-        let config = config.clone();
-        async move {
-            downloader::download_album_with_progress(&api, &album, &config, Some(progress_clone))
-                .await
-        }
-    });
-
-    cli_progress::render_cli_progress(&progress, &download, progress_mode).await?;
-    let report = download.await??;
-    cli_progress::print_cli_report_summary(&report);
-    if report.has_track_failures() {
-        anyhow::bail!(
-            "{} track issue(s): {}",
-            report.track_failure_count(),
-            report
-                .issues
-                .iter()
-                .filter(|issue| issue.kind.is_track_failure())
-                .map(|issue| issue.summary())
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
-    }
-    Ok(())
-}
-
-async fn download_all<A: MusicSource>(
-    api: &A,
-    config: &Config,
-    progress_mode: cli_progress::CliProgressMode,
-    dry_run: bool,
-) -> anyhow::Result<()> {
-    let albums = api.get_albums().await?;
-    if dry_run {
-        let matched: Vec<_> = albums.iter().collect();
-        print_matched_albums("AVAILABLE", &matched);
-        return Ok(());
-    }
-
-    println!("{} {} ALBUMS", cli_style::msr(), albums.len());
-
-    let mut failures = Vec::new();
-    for (i, album_brief) in albums.iter().enumerate() {
-        println!(
-            "\n{} [{}/{}] {}",
-            cli_style::title("ALBUM"),
-            i + 1,
-            albums.len(),
-            cli_style::value(&album_brief.name)
-        );
-        match api.get_album_detail(&album_brief.cid).await {
-            Ok(album_detail) => {
-                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
-                    if cli_progress::is_interrupted(&e) {
-                        return Err(e);
-                    }
-                    let message = format!("{}: {}", album_brief.name, e);
-                    eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
-                    failures.push(message);
-                }
-            }
-            Err(e) => {
-                let message = format!("{}: {}", album_brief.name, e);
-                eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
-                failures.push(message);
-            }
-        }
-    }
-
-    if !failures.is_empty() {
-        anyhow::bail!(
-            "{} album(s) failed: {}",
-            failures.len(),
-            failures.join("; ")
-        );
-    }
-
-    Ok(())
-}
-
-async fn download_albums_by_name<A: MusicSource>(
-    api: &A,
-    config: &Config,
-    names: &[String],
-    exact: bool,
-    dry_run: bool,
-    progress_mode: cli_progress::CliProgressMode,
-) -> anyhow::Result<()> {
-    let albums = api.get_albums().await?;
-    let matched: Vec<_> = albums
-        .iter()
-        .filter(|a| {
-            names.iter().any(|n| {
-                if exact {
-                    a.name.eq_ignore_ascii_case(n)
-                } else {
-                    a.name.to_lowercase().contains(&n.to_lowercase())
-                }
-            })
-        })
-        .collect();
-
-    if matched.is_empty() {
-        anyhow::bail!("no albums matched the given names; use --list to inspect available albums");
-    }
-
-    print_matched_albums("MATCHING", &matched);
-
-    if dry_run {
-        return Ok(());
-    }
-
-    let mut failures = Vec::new();
-    for album_brief in matched {
-        println!(
-            "\n{} {}",
-            cli_style::title("ALBUM"),
-            cli_style::value(&album_brief.name)
-        );
-        match api.get_album_detail(&album_brief.cid).await {
-            Ok(album_detail) => {
-                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
-                    if cli_progress::is_interrupted(&e) {
-                        return Err(e);
-                    }
-                    let message = format!("{}: {}", album_brief.name, e);
-                    eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
-                    failures.push(message);
-                }
-            }
-            Err(e) => {
-                let message = format!("{}: {}", album_brief.name, e);
-                eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
-                failures.push(message);
-            }
-        }
-    }
-
-    if !failures.is_empty() {
-        anyhow::bail!(
-            "{} album(s) failed: {}",
-            failures.len(),
-            failures.join("; ")
-        );
-    }
-
-    Ok(())
-}
-
-async fn download_albums_by_id<A: MusicSource>(
-    api: &A,
-    config: &Config,
-    ids: &[String],
-    dry_run: bool,
-    progress_mode: cli_progress::CliProgressMode,
-) -> anyhow::Result<()> {
-    let albums = api.get_albums().await?;
-    let matched: Vec<_> = albums
-        .iter()
-        .filter(|a| ids.iter().any(|id| a.cid.eq_ignore_ascii_case(id)))
-        .collect();
-
-    if matched.is_empty() {
-        anyhow::bail!("no albums matched the given CIDs; use --list to inspect available albums");
-    }
-
-    print_matched_albums("MATCHING", &matched);
-
-    if dry_run {
-        return Ok(());
-    }
-
-    let mut failures = Vec::new();
-    for album_brief in matched {
-        println!(
-            "\n{} {}",
-            cli_style::title("ALBUM"),
-            cli_style::value(&album_brief.name)
-        );
-        match api.get_album_detail(&album_brief.cid).await {
-            Ok(album_detail) => {
-                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
-                    if cli_progress::is_interrupted(&e) {
-                        return Err(e);
-                    }
-                    let message = format!("{}: {}", album_brief.name, e);
-                    eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
-                    failures.push(message);
-                }
-            }
-            Err(e) => {
-                let message = format!("{}: {}", album_brief.name, e);
-                eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
-                failures.push(message);
-            }
-        }
-    }
-
-    if !failures.is_empty() {
-        anyhow::bail!(
-            "{} album(s) failed: {}",
-            failures.len(),
-            failures.join("; ")
-        );
-    }
-
-    Ok(())
-}
-
-fn print_matched_albums(label: &str, albums: &[&models::AlbumBrief]) {
-    println!("{} {} {} ALBUMS", cli_style::msr(), albums.len(), label);
-    for album in albums {
-        println!("  {}  {}", cli_style::dimmed(&album.cid), album.name);
     }
 }
 
@@ -967,11 +466,11 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let cli = cli::Cli::parse();
 
     if cli.init_config {
         let path = cli.config.as_deref().unwrap_or(Path::new("msr.toml"));
-        init_config_file(path, cli.yes)?;
+        cli::init_config_file(path, cli.yes)?;
         println!("{} CONFIG WRITTEN {}", cli_style::msr(), path.display());
         return Ok(());
     }
@@ -989,25 +488,25 @@ async fn main() -> anyhow::Result<()> {
     config.validate()?;
 
     if cli.print_config {
-        print_config_summary(&config);
+        cli::print_config_summary(&config);
         return Ok(());
     }
 
     if cli.check_config {
         println!("{} CONFIG OK", cli_style::msr());
-        print_config_summary(&config);
+        cli::print_config_summary(&config);
         return Ok(());
     }
 
     if cli.clean_parts {
-        match clean_partial_files(&config.download.output_dir, cli.dry_run, cli.yes)? {
-            CleanPartsResult::DryRun(count) => println!(
+        match cli::clean_partial_files(&config.download.output_dir, cli.dry_run, cli.yes)? {
+            cli::CleanPartsResult::DryRun(count) => println!(
                 "{} DRY RUN / {} PARTIAL FILE{} WOULD BE REMOVED",
                 cli_style::msr(),
                 count,
                 if count == 1 { "" } else { "S" }
             ),
-            CleanPartsResult::Removed(removed) => println!(
+            cli::CleanPartsResult::Removed(removed) => println!(
                 "{} {} PARTIAL FILE{} REMOVED",
                 cli_style::msr(),
                 removed,
@@ -1017,7 +516,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    validate_cli_action(&cli)?;
+    cli::validate_cli_action(&cli)?;
 
     let api = ApiClient::new(&config.api)?;
 
@@ -1053,7 +552,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let performed_download = if let Some(names) = cli.album {
-        download_albums_by_name(
+        cli::download_albums_by_name(
             &api,
             &config,
             &names,
@@ -1064,13 +563,13 @@ async fn main() -> anyhow::Result<()> {
         .await?;
         !cli.dry_run
     } else if let Some(ids) = cli.album_id {
-        download_albums_by_id(&api, &config, &ids, cli.dry_run, cli_progress_mode).await?;
+        cli::download_albums_by_id(&api, &config, &ids, cli.dry_run, cli_progress_mode).await?;
         !cli.dry_run
     } else if cli.all {
-        download_all(&api, &config, cli_progress_mode, cli.dry_run).await?;
+        cli::download_all(&api, &config, cli_progress_mode, cli.dry_run).await?;
         !cli.dry_run
     } else {
-        return Err(no_cli_action_error());
+        return Err(cli::no_cli_action_error());
     };
 
     if performed_download {
@@ -1082,6 +581,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use msr_downloader::models::AlbumBrief;
 
     fn album(name: &str) -> models::AlbumBrief {
         models::AlbumBrief {
@@ -1186,7 +686,7 @@ mod tests {
         std::fs::write(nested.join("cover.jpg.part"), b"partial").unwrap();
 
         let mut files = Vec::new();
-        collect_partial_files(&root, &mut files).unwrap();
+        cli::clean::collect_partial_files(&root, &mut files).unwrap();
         files.sort();
 
         assert_eq!(files.len(), 3);
@@ -1296,8 +796,8 @@ mod tests {
 
     #[test]
     fn cli_requires_explicit_action_in_cli_mode() {
-        let cli = Cli::try_parse_from(["msr-downloader", "--cli"]).unwrap();
-        let error = validate_cli_action(&cli).unwrap_err().to_string();
+        let cli = cli::Cli::try_parse_from(["msr-downloader", "--cli"]).unwrap();
+        let error = cli::validate_cli_action(&cli).unwrap_err().to_string();
 
         assert!(error.contains("no CLI action selected"));
         assert!(error.contains("msr-downloader --cli --list"));
@@ -1305,14 +805,14 @@ mod tests {
 
     #[test]
     fn cli_all_flag_parses() {
-        let cli = Cli::try_parse_from(["msr-downloader", "--cli", "--all"]).unwrap();
+        let cli = cli::Cli::try_parse_from(["msr-downloader", "--cli", "--all"]).unwrap();
 
-        assert!(validate_cli_action(&cli).is_ok());
+        assert!(cli::validate_cli_action(&cli).is_ok());
     }
 
     #[test]
     fn cli_album_and_album_id_conflict() {
-        let cli = Cli::try_parse_from([
+        let cli = cli::Cli::try_parse_from([
             "msr-downloader",
             "--cli",
             "--album",
@@ -1321,45 +821,48 @@ mod tests {
             "123",
         ])
         .unwrap();
-        let error = validate_cli_action(&cli).unwrap_err().to_string();
+        let error = cli::validate_cli_action(&cli).unwrap_err().to_string();
 
         assert!(error.contains("use either --album or --album-id"));
     }
 
     #[test]
     fn cli_dry_run_flag_parses() {
-        let cli = Cli::try_parse_from(["msr-downloader", "--cli", "--album", "test", "--dry-run"])
-            .unwrap();
+        let cli =
+            cli::Cli::try_parse_from(["msr-downloader", "--cli", "--album", "test", "--dry-run"])
+                .unwrap();
 
         assert!(cli.dry_run);
-        assert!(validate_cli_action(&cli).is_ok());
+        assert!(cli::validate_cli_action(&cli).is_ok());
     }
 
     #[test]
     fn cli_all_dry_run_flag_parses() {
-        let cli = Cli::try_parse_from(["msr-downloader", "--cli", "--all", "--dry-run"]).unwrap();
+        let cli =
+            cli::Cli::try_parse_from(["msr-downloader", "--cli", "--all", "--dry-run"]).unwrap();
 
         assert!(cli.all);
         assert!(cli.dry_run);
-        assert!(validate_cli_action(&cli).is_ok());
+        assert!(cli::validate_cli_action(&cli).is_ok());
     }
 
     #[test]
     fn cli_clean_parts_requires_yes() {
-        let cli = Cli::try_parse_from(["msr-downloader", "--clean-parts"]).unwrap();
+        let cli = cli::Cli::try_parse_from(["msr-downloader", "--clean-parts"]).unwrap();
         assert!(cli.clean_parts);
         assert!(!cli.yes);
     }
 
     #[test]
     fn cli_print_config_flag_parses() {
-        let cli = Cli::try_parse_from(["msr-downloader", "--print-config"]).unwrap();
+        let cli = cli::Cli::try_parse_from(["msr-downloader", "--print-config"]).unwrap();
         assert!(cli.print_config);
     }
 
     #[test]
     fn default_config_toml_is_valid() {
-        let config: Config = toml::from_str(default_config_toml()).unwrap();
+        use std::path::PathBuf;
+        let config: Config = toml::from_str(cli::config::default_config_toml()).unwrap();
 
         assert!(config.validate().is_ok());
         assert_eq!(config.download.output_dir, PathBuf::from("./MSR_Albums"));
@@ -1381,7 +884,7 @@ mod tests {
         let path = root.join("msr.toml");
         std::fs::write(&path, "existing").unwrap();
 
-        assert!(init_config_file(&path, false).is_err());
+        assert!(cli::init_config_file(&path, false).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing");
 
         std::fs::remove_dir_all(root).unwrap();
@@ -1399,7 +902,7 @@ mod tests {
         ));
         let path = root.join("nested").join("msr.toml");
 
-        init_config_file(&path, false).unwrap();
+        cli::init_config_file(&path, false).unwrap();
         let config: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(config.validate().is_ok());
 
@@ -1409,7 +912,7 @@ mod tests {
     #[tokio::test]
     async fn download_albums_by_name_errors_when_no_album_matches() {
         use async_trait::async_trait;
-        use msr_downloader::models::AlbumBrief;
+        use msr_downloader::api::MusicSource;
 
         #[derive(Clone, Default)]
         struct MockSource {
@@ -1452,12 +955,12 @@ mod tests {
             }],
         };
 
-        let error = download_albums_by_name(
+        let error = cli::download_albums_by_name(
             &source,
             &Config::default(),
-            &["missing".to_string()],
+            &["no-match".to_string()],
             false,
-            true,
+            false,
             cli_progress::CliProgressMode::Summary,
         )
         .await
