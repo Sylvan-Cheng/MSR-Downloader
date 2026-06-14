@@ -44,14 +44,6 @@ pub(crate) fn error(text: &str) -> String {
     }
 }
 
-pub(crate) fn success(text: &str) -> String {
-    if no_color() {
-        text.to_string()
-    } else {
-        text.green().bold().to_string()
-    }
-}
-
 pub(crate) fn warning(text: &str) -> String {
     if no_color() {
         text.to_string()
