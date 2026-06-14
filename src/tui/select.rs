@@ -1,4 +1,3 @@
-use crate::models;
 use crate::tui::chrome::{
     controls_line, create_block, draw_app_header, draw_controls_bar, draw_status_bar,
 };
@@ -6,6 +5,7 @@ use crate::tui::layout::{app_chunks, select_body_chunks};
 use crate::tui::overlay::draw_help_overlay;
 use crate::tui::state::{AppScreen, HelpOverlay};
 use crate::tui::theme::{COLOR_MUTED, COLOR_PRIMARY, COLOR_SECONDARY, COLOR_SUCCESS};
+use msr_downloader::models;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},

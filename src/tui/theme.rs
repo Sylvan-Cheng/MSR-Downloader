@@ -1,4 +1,4 @@
-use crate::progress::SongStatus;
+use msr_downloader::progress::SongStatus;
 use ratatui::style::{Color, Modifier, Style};
 
 pub(crate) const COLOR_PRIMARY: Color = Color::Rgb(0, 216, 198);

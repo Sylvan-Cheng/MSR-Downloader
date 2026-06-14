@@ -1,6 +1,3 @@
-use crate::format;
-use crate::models;
-use crate::progress::{AlbumDownloadReport, DownloadProgress};
 use crate::tui::chrome::{
     controls_line, create_block, draw_app_header, draw_controls_bar, draw_status_bar,
 };
@@ -10,6 +7,9 @@ use crate::tui::theme::{
     tui_status_style, COLOR_ERROR, COLOR_INFO, COLOR_MUTED, COLOR_SECONDARY, COLOR_SUCCESS,
     COLOR_WARNING,
 };
+use msr_downloader::format;
+use msr_downloader::models;
+use msr_downloader::progress::{AlbumDownloadReport, DownloadProgress};
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
@@ -416,7 +416,7 @@ pub(crate) fn current_transfer_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::progress::SongStatus;
+    use msr_downloader::progress::SongStatus;
 
     #[test]
     fn download_status_stays_status_only() {

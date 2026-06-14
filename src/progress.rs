@@ -1,6 +1,8 @@
+use serde::Serialize;
 use std::time::Instant;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SongStatus {
     Queued,
     Checking,
@@ -12,7 +14,8 @@ pub enum SongStatus {
     Failed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum DownloadIssueKind {
     Audio,
     Cover,
@@ -39,7 +42,8 @@ impl DownloadIssueKind {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DownloadIssue {
     pub kind: DownloadIssueKind,
     pub item: String,
@@ -128,7 +132,7 @@ impl SongProgress {
         self.status == SongStatus::Failed
     }
 
-    pub(crate) fn active_for_plain_output(&self) -> bool {
+    pub fn active_for_plain_output(&self) -> bool {
         matches!(
             self.status,
             SongStatus::Checking | SongStatus::Getting | SongStatus::Resuming | SongStatus::Tagging
@@ -146,14 +150,16 @@ pub struct DownloadProgress {
     pub issues: Vec<DownloadIssue>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TrackDownloadReport {
     pub index: usize,
     pub name: String,
     pub status: SongStatus,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AlbumDownloadReport {
     pub album_name: String,
     pub total_tracks: usize,
@@ -204,12 +210,12 @@ impl AlbumDownloadReport {
     }
 
     pub fn track_failure_count(&self) -> usize {
-        self.failed_count()
-            + self
-                .issues
-                .iter()
-                .filter(|issue| issue.kind.is_track_failure())
-                .count()
+        let task_issues = self
+            .issues
+            .iter()
+            .filter(|issue| issue.kind == DownloadIssueKind::Task)
+            .count();
+        self.failed_count() + task_issues
     }
 
     pub fn has_track_failures(&self) -> bool {
@@ -297,7 +303,7 @@ impl DownloadProgress {
         }
     }
 
-    pub(crate) fn task_mut_or_insert(
+    pub fn task_mut_or_insert(
         &mut self,
         index: usize,
         name: &str,
@@ -313,6 +319,39 @@ impl DownloadProgress {
         self.tasks.push(SongProgress::new(index, name, status));
         self.tasks.last_mut().expect("task inserted")
     }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum DownloadEvent {
+    #[serde(rename_all = "camelCase")]
+    AlbumStarted {
+        album_name: String,
+        total_tracks: usize,
+    },
+    #[serde(rename_all = "camelCase")]
+    TrackQueued { index: usize, name: String },
+    #[serde(rename_all = "camelCase")]
+    TrackProgress {
+        index: usize,
+        name: String,
+        downloaded: u64,
+        total: u64,
+        speed_bps: f64,
+        resumed: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    TrackFinished {
+        index: usize,
+        name: String,
+        status: SongStatus,
+    },
+    #[serde(rename_all = "camelCase")]
+    Issue { issue: DownloadIssue },
+    #[serde(rename_all = "camelCase")]
+    AlbumFinished { report: AlbumDownloadReport },
+    #[serde(rename_all = "camelCase")]
+    AlbumFailed { error: String },
 }
 
 #[cfg(test)]
@@ -331,5 +370,95 @@ mod tests {
 
         assert_eq!(task.last_update, Some(original_update));
         assert_eq!(task.status, SongStatus::Getting);
+    }
+
+    #[test]
+    fn download_event_json_uses_tagged_enum_and_camel_case() {
+        let event = DownloadEvent::AlbumStarted {
+            album_name: "Test".to_string(),
+            total_tracks: 5,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"albumStarted""#), "got: {json}");
+        assert!(json.contains(r#""albumName":"Test""#), "got: {json}");
+        assert!(json.contains(r#""totalTracks":5"#), "got: {json}");
+    }
+
+    #[test]
+    fn download_event_track_progress_json_shape() {
+        let event = DownloadEvent::TrackProgress {
+            index: 1,
+            name: "Song".to_string(),
+            downloaded: 1024,
+            total: 4096,
+            speed_bps: 512.0,
+            resumed: false,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"trackProgress""#), "got: {json}");
+        assert!(json.contains(r#""index":1"#), "got: {json}");
+        assert!(json.contains(r#""speedBps":512.0"#), "got: {json}");
+    }
+
+    #[test]
+    fn download_event_album_failed_json_shape() {
+        let event = DownloadEvent::AlbumFailed {
+            error: "network error".to_string(),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "albumFailed");
+        assert_eq!(json["error"], "network error");
+    }
+
+    #[test]
+    fn song_status_json_is_camel_case() {
+        let json = serde_json::to_value(SongStatus::Getting).unwrap();
+        assert_eq!(json, "getting");
+        let json = serde_json::to_value(SongStatus::Failed).unwrap();
+        assert_eq!(json, "failed");
+    }
+
+    #[test]
+    fn track_failure_count_does_not_double_count_audio_issues() {
+        let report = AlbumDownloadReport {
+            album_name: "test".to_string(),
+            total_tracks: 1,
+            tracks: vec![TrackDownloadReport {
+                index: 1,
+                name: "song".to_string(),
+                status: SongStatus::Failed,
+            }],
+            issues: vec![DownloadIssue::new(
+                DownloadIssueKind::Audio,
+                "song",
+                "download failed",
+            )],
+        };
+
+        assert_eq!(report.failed_count(), 1);
+        assert_eq!(report.track_failure_count(), 1);
+        assert!(report.has_track_failures());
+    }
+
+    #[test]
+    fn track_failure_count_includes_task_issues_without_track() {
+        let report = AlbumDownloadReport {
+            album_name: "test".to_string(),
+            total_tracks: 2,
+            tracks: vec![TrackDownloadReport {
+                index: 1,
+                name: "ok".to_string(),
+                status: SongStatus::Done,
+            }],
+            issues: vec![DownloadIssue::new(
+                DownloadIssueKind::Task,
+                "",
+                "task panicked",
+            )],
+        };
+
+        assert_eq!(report.failed_count(), 0);
+        assert_eq!(report.track_failure_count(), 1);
+        assert!(report.has_track_failures());
     }
 }

@@ -1,9 +1,11 @@
 use crate::cli_style;
-use crate::format;
-use crate::progress::{AlbumDownloadReport, DownloadIssueKind, DownloadProgress, SongStatus};
 use crossterm::{
     cursor, execute,
     terminal::{Clear, ClearType},
+};
+use msr_downloader::format;
+use msr_downloader::progress::{
+    AlbumDownloadReport, DownloadIssueKind, DownloadProgress, SongStatus,
 };
 use std::fmt;
 use std::io::{self, IsTerminal, Write};

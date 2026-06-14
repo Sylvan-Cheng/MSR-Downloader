@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 pub struct ApiResponse<T> {
@@ -8,7 +8,7 @@ pub struct ApiResponse<T> {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AlbumBrief {
     pub cid: String,
     pub name: String,
@@ -18,7 +18,7 @@ pub struct AlbumBrief {
     pub artists: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SongBrief {
     pub cid: String,
     pub name: String,
@@ -27,7 +27,7 @@ pub struct SongBrief {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AlbumDetail {
     pub cid: String,
     pub name: String,
@@ -44,7 +44,7 @@ pub struct AlbumDetail {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SongDetail {
     pub cid: String,
     pub name: String,

@@ -1,16 +1,16 @@
 use crate::api::{FileProgress, MusicSource};
-use crate::cli_style;
 use crate::config::Config;
 use crate::fs_util;
 use crate::metadata;
 use crate::models::{AlbumDetail, SongDetail};
 use crate::progress::{
-    AlbumDownloadReport, DownloadIssue, DownloadIssueKind, DownloadProgress, SongStatus,
+    AlbumDownloadReport, DownloadEvent, DownloadIssue, DownloadIssueKind, DownloadProgress,
+    SongStatus,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, Semaphore};
 
 struct SongDownloadJob {
     album_path: PathBuf,
@@ -21,6 +21,7 @@ struct SongDownloadJob {
     total: usize,
     cover_data: Option<Vec<u8>>,
     progress: Option<Arc<Mutex<DownloadProgress>>>,
+    event_sender: Option<mpsc::UnboundedSender<DownloadEvent>>,
 }
 
 struct MetadataWrite<'a> {
@@ -32,43 +33,7 @@ struct MetadataWrite<'a> {
     lyrics_text: Option<String>,
     downloaded: bool,
     progress: &'a Option<Arc<Mutex<DownloadProgress>>>,
-}
-
-pub async fn download_album<A: MusicSource>(
-    api: &A,
-    album: &AlbumDetail,
-    config: &Config,
-    progress_mode: crate::cli_progress::CliProgressMode,
-) -> anyhow::Result<()> {
-    let progress = Arc::new(Mutex::new(DownloadProgress::new(
-        &album.name,
-        album.songs.len(),
-    )));
-    let progress_clone = progress.clone();
-    let download = tokio::spawn({
-        let api = api.clone();
-        let album = album.clone();
-        let config = config.clone();
-        async move { download_album_with_progress(&api, &album, &config, Some(progress_clone)).await }
-    });
-
-    crate::cli_progress::render_cli_progress(&progress, &download, progress_mode).await?;
-    let report = download.await??;
-    crate::cli_progress::print_cli_report_summary(&report);
-    if report.has_track_failures() {
-        anyhow::bail!(
-            "{} track issue(s): {}",
-            report.track_failure_count(),
-            report
-                .issues
-                .iter()
-                .filter(|issue| issue.kind.is_track_failure())
-                .map(|issue| issue.summary())
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
-    }
-    Ok(())
+    event_sender: &'a Option<mpsc::UnboundedSender<DownloadEvent>>,
 }
 
 pub async fn download_album_with_progress<A: MusicSource>(
@@ -84,6 +49,70 @@ pub async fn download_album_with_progress<A: MusicSource>(
         )))
     });
     let progress = Some(progress);
+    download_album_inner(api, album, config, &progress, &None).await
+}
+
+pub async fn download_album_with_events<A: MusicSource>(
+    api: &A,
+    album: &AlbumDetail,
+    config: &Config,
+    event_sender: mpsc::UnboundedSender<DownloadEvent>,
+) -> anyhow::Result<AlbumDownloadReport> {
+    download_album_inner(api, album, config, &None, &Some(event_sender)).await
+}
+
+async fn download_album_inner<A: MusicSource>(
+    api: &A,
+    album: &AlbumDetail,
+    config: &Config,
+    progress: &Option<Arc<Mutex<DownloadProgress>>>,
+    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
+) -> anyhow::Result<AlbumDownloadReport> {
+    emit_event(
+        event_sender,
+        DownloadEvent::AlbumStarted {
+            album_name: album.name.clone(),
+            total_tracks: album.songs.len(),
+        },
+    );
+
+    match download_album_body(api, album, config, progress, event_sender).await {
+        Ok(report) => {
+            emit_event(
+                event_sender,
+                DownloadEvent::AlbumFinished {
+                    report: report.clone(),
+                },
+            );
+            Ok(report)
+        }
+        Err(e) => {
+            emit_event(
+                event_sender,
+                DownloadEvent::AlbumFailed {
+                    error: e.to_string(),
+                },
+            );
+            Err(e)
+        }
+    }
+}
+
+async fn download_album_body<A: MusicSource>(
+    api: &A,
+    album: &AlbumDetail,
+    config: &Config,
+    progress: &Option<Arc<Mutex<DownloadProgress>>>,
+    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
+) -> anyhow::Result<AlbumDownloadReport> {
+    let progress = progress.clone().unwrap_or_else(|| {
+        Arc::new(Mutex::new(DownloadProgress::new(
+            &album.name,
+            album.songs.len(),
+        )))
+    });
+    let progress = Some(progress);
+
     let album_path = create_album_path(config, album)?;
 
     if config.download.include.album_info {
@@ -91,7 +120,7 @@ pub async fn download_album_with_progress<A: MusicSource>(
     }
 
     let cover_data = if config.download.include.covers {
-        download_covers(api, &album_path, album, &progress).await?
+        download_covers(api, &album_path, album, &progress, event_sender).await?
     } else {
         None
     };
@@ -104,6 +133,13 @@ pub async fn download_album_with_progress<A: MusicSource>(
     for (idx, song_brief) in album.songs.iter().enumerate() {
         let song_detail = api.get_song(&song_brief.cid).await?;
         set_progress_status(&progress, idx + 1, &song_detail.name, SongStatus::Queued);
+        emit_event(
+            event_sender,
+            DownloadEvent::TrackQueued {
+                index: idx + 1,
+                name: song_detail.name.clone(),
+            },
+        );
         song_details.push((idx, song_detail));
     }
 
@@ -119,6 +155,7 @@ pub async fn download_album_with_progress<A: MusicSource>(
         let progress_clone = progress.clone();
         let semaphore_clone = semaphore.clone();
         let album_clone = album.clone();
+        let event_sender_clone = event_sender.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = semaphore_clone.acquire().await.unwrap();
@@ -134,6 +171,7 @@ pub async fn download_album_with_progress<A: MusicSource>(
                     total,
                     cover_data: cover_data_clone,
                     progress: progress_clone,
+                    event_sender: event_sender_clone,
                 },
             )
             .await
@@ -149,6 +187,7 @@ pub async fn download_album_with_progress<A: MusicSource>(
                     let message = format!("Download error: {}", e);
                     push_issue(
                         &progress,
+                        event_sender,
                         DownloadIssue::new(DownloadIssueKind::Audio, "", message.clone()),
                     );
                 }
@@ -157,6 +196,7 @@ pub async fn download_album_with_progress<A: MusicSource>(
                 let message = format!("Task error: {}", e);
                 push_issue(
                     &progress,
+                    event_sender,
                     DownloadIssue::new(DownloadIssueKind::Task, "", message.clone()),
                 );
             }
@@ -164,6 +204,12 @@ pub async fn download_album_with_progress<A: MusicSource>(
     }
 
     Ok(report_from_progress(&progress, album))
+}
+
+fn emit_event(sender: &Option<mpsc::UnboundedSender<DownloadEvent>>, event: DownloadEvent) {
+    if let Some(tx) = sender {
+        let _ = tx.send(event);
+    }
 }
 
 fn report_from_progress(
@@ -198,10 +244,12 @@ fn create_album_path(config: &Config, album: &AlbumDetail) -> anyhow::Result<Pat
 
 fn update_progress(
     progress: &Option<Arc<Mutex<DownloadProgress>>>,
+    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
     current_song: usize,
     song_name: &str,
     file_progress: FileProgress,
 ) {
+    let mut speed_bps = 0.0;
     if let Some(ref p) = progress {
         if let Ok(mut prog) = p.lock() {
             let now = Instant::now();
@@ -231,8 +279,21 @@ fn update_progress(
                 }
             }
             task.last_update = Some(now);
+            speed_bps = task.speed_bps;
         }
     }
+
+    emit_event(
+        event_sender,
+        DownloadEvent::TrackProgress {
+            index: current_song,
+            name: song_name.to_string(),
+            downloaded: file_progress.downloaded,
+            total: file_progress.total,
+            speed_bps,
+            resumed: file_progress.resumed,
+        },
+    );
 }
 
 fn set_progress_status(
@@ -250,10 +311,20 @@ fn set_progress_status(
 
 fn finish_progress(
     progress: &Option<Arc<Mutex<DownloadProgress>>>,
+    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
     current_song: usize,
+    song_name: &str,
     skipped: bool,
     failed: bool,
 ) {
+    let status = if failed {
+        SongStatus::Failed
+    } else if skipped {
+        SongStatus::Skipped
+    } else {
+        SongStatus::Done
+    };
+
     if let Some(ref p) = progress {
         if let Ok(mut prog) = p.lock() {
             let mut counted = false;
@@ -263,13 +334,7 @@ fn finish_progress(
                 .find(|task| task.index == current_song)
             {
                 counted = !task.is_done();
-                task.status = if failed {
-                    SongStatus::Failed
-                } else if skipped {
-                    SongStatus::Skipped
-                } else {
-                    SongStatus::Done
-                };
+                task.status = status;
                 task.speed_bps = 0.0;
                 task.last_update = Some(Instant::now());
             }
@@ -278,21 +343,32 @@ fn finish_progress(
             }
         }
     }
+
+    emit_event(
+        event_sender,
+        DownloadEvent::TrackFinished {
+            index: current_song,
+            name: song_name.to_string(),
+            status,
+        },
+    );
 }
 
-fn push_issue(progress: &Option<Arc<Mutex<DownloadProgress>>>, issue: DownloadIssue) {
+fn push_issue(
+    progress: &Option<Arc<Mutex<DownloadProgress>>>,
+    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
+    issue: DownloadIssue,
+) {
     let message = issue.summary();
     if let Some(ref p) = progress {
         if let Ok(mut prog) = p.lock() {
-            prog.push_issue(issue);
+            prog.push_issue(issue.clone());
         }
     } else {
-        eprintln!(
-            "  {} {}",
-            cli_style::error("ERR"),
-            cli_style::error(&message)
-        );
+        eprintln!("  ERR {}", message);
     }
+
+    emit_event(event_sender, DownloadEvent::Issue { issue });
 }
 
 fn save_album_info(path: &Path, album: &AlbumDetail) -> anyhow::Result<()> {
@@ -319,6 +395,7 @@ async fn download_covers<A: MusicSource>(
     path: &Path,
     album: &AlbumDetail,
     progress: &Option<Arc<Mutex<DownloadProgress>>>,
+    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
 ) -> anyhow::Result<Option<Vec<u8>>> {
     let album_name = fs_util::sanitize(&album.name);
     let mut cover_data: Option<Vec<u8>> = None;
@@ -333,6 +410,7 @@ async fn download_covers<A: MusicSource>(
         album.name.as_str(),
         "Failed to download cover",
         progress,
+        event_sender,
     )
     .await;
 
@@ -350,6 +428,7 @@ async fn download_covers<A: MusicSource>(
         album.name.as_str(),
         "Failed to download alternate cover",
         progress,
+        event_sender,
     )
     .await;
 
@@ -364,6 +443,7 @@ async fn download_optional_file<A: MusicSource>(
     item: &str,
     context: &str,
     progress: &Option<Arc<Mutex<DownloadProgress>>>,
+    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
 ) {
     if dest.exists() {
         return;
@@ -372,6 +452,7 @@ async fn download_optional_file<A: MusicSource>(
     if let Err(e) = api.download_file(url, dest).await {
         push_issue(
             progress,
+            event_sender,
             DownloadIssue::new(kind, item, format!("{}: {}", context, e)),
         );
     }
@@ -390,23 +471,25 @@ async fn download_song_with_progress<A: MusicSource>(
         total,
         cover_data,
         progress,
+        event_sender,
     } = job;
 
     let dest = fs_util::build_song_path(&config, &album_path, &song)?;
     let existing_converted_dest = fs_util::existing_converted_dest(&config, &dest, &song);
 
     let downloaded = if let Some(final_dest) = existing_converted_dest.as_deref() {
-        skip_existing_converted_file(final_dest, &song, current, &progress);
+        skip_existing_converted_file(final_dest, &song, current, &progress, &event_sender);
         false
     } else {
-        download_audio_file(api, &song, &dest, current, total, &progress).await?
+        download_audio_file(api, &song, &dest, current, total, &progress, &event_sender).await?
     };
 
-    let lyrics_text = download_lyrics(api, &config, &album_path, &song, &progress).await?;
+    let lyrics_text =
+        download_lyrics(api, &config, &album_path, &song, &progress, &event_sender).await?;
 
     let final_dest = match existing_converted_dest {
         Some(path) => path,
-        None => convert_if_needed(&config, &dest, &song, &progress)?,
+        None => convert_if_needed(&config, &dest, &song, &progress, &event_sender)?,
     };
 
     if downloaded {
@@ -422,10 +505,11 @@ async fn download_song_with_progress<A: MusicSource>(
         lyrics_text,
         downloaded,
         progress: &progress,
+        event_sender: &event_sender,
     })?;
 
     if downloaded {
-        finish_progress(&progress, current, false, false);
+        finish_progress(&progress, &event_sender, current, &song.name, false, false);
     }
 
     Ok(())
@@ -436,6 +520,7 @@ fn skip_existing_converted_file(
     song: &SongDetail,
     current: usize,
     progress: &Option<Arc<Mutex<DownloadProgress>>>,
+    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
 ) {
     let size = final_dest
         .metadata()
@@ -443,6 +528,7 @@ fn skip_existing_converted_file(
         .unwrap_or(1);
     update_progress(
         progress,
+        event_sender,
         current,
         &song.name,
         FileProgress {
@@ -453,7 +539,7 @@ fn skip_existing_converted_file(
             attempt: 0,
         },
     );
-    finish_progress(progress, current, true, false);
+    finish_progress(progress, event_sender, current, &song.name, true, false);
 }
 
 async fn download_audio_file<A: MusicSource>(
@@ -463,6 +549,7 @@ async fn download_audio_file<A: MusicSource>(
     current: usize,
     total: usize,
     progress: &Option<Arc<Mutex<DownloadProgress>>>,
+    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
 ) -> anyhow::Result<bool> {
     set_progress_status(progress, current, &song.name, SongStatus::Checking);
 
@@ -471,6 +558,7 @@ async fn download_audio_file<A: MusicSource>(
             let size = dest.metadata().map(|metadata| metadata.len()).unwrap_or(1);
             update_progress(
                 progress,
+                event_sender,
                 current,
                 &song.name,
                 FileProgress {
@@ -481,7 +569,7 @@ async fn download_audio_file<A: MusicSource>(
                     attempt: 0,
                 },
             );
-            finish_progress(progress, current, true, false);
+            finish_progress(progress, event_sender, current, &song.name, true, false);
             return Ok(false);
         }
 
@@ -491,8 +579,16 @@ async fn download_audio_file<A: MusicSource>(
     let song_name = song.name.clone();
     set_progress_status(progress, current, &song_name, SongStatus::Getting);
 
-    let mut on_progress = |file_progress| {
-        update_progress(progress, current, &song_name, file_progress);
+    let progress_clone = progress.clone();
+    let event_sender_clone = event_sender.clone();
+    let mut on_progress = move |file_progress| {
+        update_progress(
+            &progress_clone,
+            &event_sender_clone,
+            current,
+            &song_name,
+            file_progress,
+        );
     };
     let result = api
         .download_file_with_progress(&song.source_url, dest, &mut on_progress)
@@ -502,7 +598,7 @@ async fn download_audio_file<A: MusicSource>(
         Ok(_) => Ok(true),
         Err(e) => {
             let _ = total;
-            finish_progress(progress, current, false, true);
+            finish_progress(progress, event_sender, current, &song.name, false, true);
             Err(e)
         }
     }
@@ -523,12 +619,8 @@ async fn existing_file_is_complete<A: MusicSource>(
         Ok(None) => Ok(false),
         Err(e) => {
             eprintln!(
-                "  {} {}",
-                cli_style::warning("CHK"),
-                cli_style::warning(&format!(
-                    "Could not verify existing file for {}; re-downloading: {}",
-                    song.name, e
-                ))
+                "  CHK Could not verify existing file for {}; re-downloading: {}",
+                song.name, e
             );
             Ok(false)
         }
@@ -541,6 +633,7 @@ async fn download_lyrics<A: MusicSource>(
     path: &Path,
     song: &SongDetail,
     progress: &Option<Arc<Mutex<DownloadProgress>>>,
+    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
 ) -> anyhow::Result<Option<String>> {
     if !config.download.include.lyrics {
         return Ok(None);
@@ -563,6 +656,7 @@ async fn download_lyrics<A: MusicSource>(
         song.name.as_str(),
         "Failed to download lyrics",
         progress,
+        event_sender,
     )
     .await;
 
@@ -573,6 +667,7 @@ async fn download_lyrics<A: MusicSource>(
                 let message = format!("Could not read lyrics for {}: {}", song.name, e);
                 push_issue(
                     progress,
+                    event_sender,
                     DownloadIssue::new(DownloadIssueKind::Lyrics, song.name.as_str(), message),
                 );
                 Ok(None)
@@ -588,6 +683,7 @@ fn convert_if_needed(
     dest: &Path,
     song: &SongDetail,
     progress: &Option<Arc<Mutex<DownloadProgress>>>,
+    event_sender: &Option<mpsc::UnboundedSender<DownloadEvent>>,
 ) -> anyhow::Result<PathBuf> {
     if !config.download.convert.enabled || !config.download.convert.wav_to_flac || !dest.exists() {
         return Ok(dest.to_path_buf());
@@ -610,14 +706,7 @@ fn convert_if_needed(
     {
         Ok(_) => {
             if progress.is_none() {
-                eprintln!(
-                    "  {} {}",
-                    cli_style::success("OK"),
-                    cli_style::success(&format!(
-                        "Converted to FLAC: {}",
-                        fs_util::sanitize(&song.name)
-                    ))
-                );
+                eprintln!("  OK Converted to FLAC: {}", fs_util::sanitize(&song.name));
             }
 
             if config.download.convert.delete_original {
@@ -629,6 +718,7 @@ fn convert_if_needed(
             let message = format!("Failed to convert {} to FLAC: {}", song.name, e);
             push_issue(
                 progress,
+                event_sender,
                 DownloadIssue::new(DownloadIssueKind::Audio, song.name.as_str(), message),
             );
             Ok(dest.to_path_buf())
@@ -646,6 +736,7 @@ fn write_metadata_if_needed(args: MetadataWrite<'_>) -> anyhow::Result<()> {
         lyrics_text,
         downloaded,
         progress,
+        event_sender,
     } = args;
 
     if !config.download.include.metadata || (!downloaded && dest.exists()) {
@@ -677,201 +768,12 @@ fn write_metadata_if_needed(args: MetadataWrite<'_>) -> anyhow::Result<()> {
         let message = format!("Failed to write metadata for {}: {}", song.name, e);
         push_issue(
             progress,
+            event_sender,
             DownloadIssue::new(DownloadIssueKind::Metadata, song.name.as_str(), message),
         );
     }
 
     Ok(())
-}
-
-pub async fn download_all<A: MusicSource>(
-    api: &A,
-    config: &Config,
-    progress_mode: crate::cli_progress::CliProgressMode,
-    dry_run: bool,
-) -> anyhow::Result<()> {
-    let albums = api.get_albums().await?;
-    if dry_run {
-        let matched: Vec<_> = albums.iter().collect();
-        print_matched_albums("AVAILABLE", &matched);
-        return Ok(());
-    }
-
-    println!("{} {} ALBUMS", cli_style::msr(), albums.len());
-
-    let mut failures = Vec::new();
-    for (i, album_brief) in albums.iter().enumerate() {
-        println!(
-            "\n{} [{}/{}] {}",
-            cli_style::title("ALBUM"),
-            i + 1,
-            albums.len(),
-            cli_style::value(&album_brief.name)
-        );
-        match api.get_album_detail(&album_brief.cid).await {
-            Ok(album_detail) => {
-                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
-                    if crate::cli_progress::is_interrupted(&e) {
-                        return Err(e);
-                    }
-                    let message = format!("{}: {}", album_brief.name, e);
-                    eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
-                    failures.push(message);
-                }
-            }
-            Err(e) => {
-                let message = format!("{}: {}", album_brief.name, e);
-                eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
-                failures.push(message);
-            }
-        }
-    }
-
-    if !failures.is_empty() {
-        anyhow::bail!(
-            "{} album(s) failed: {}",
-            failures.len(),
-            failures.join("; ")
-        );
-    }
-
-    Ok(())
-}
-
-pub async fn download_albums_by_name<A: MusicSource>(
-    api: &A,
-    config: &Config,
-    names: &[String],
-    exact: bool,
-    dry_run: bool,
-    progress_mode: crate::cli_progress::CliProgressMode,
-) -> anyhow::Result<()> {
-    let albums = api.get_albums().await?;
-    let matched: Vec<_> = albums
-        .iter()
-        .filter(|a| {
-            names.iter().any(|n| {
-                if exact {
-                    a.name.eq_ignore_ascii_case(n)
-                } else {
-                    a.name.to_lowercase().contains(&n.to_lowercase())
-                }
-            })
-        })
-        .collect();
-
-    if matched.is_empty() {
-        anyhow::bail!("no albums matched the given names; use --list to inspect available albums");
-    }
-
-    print_matched_albums("MATCHING", &matched);
-
-    if dry_run {
-        return Ok(());
-    }
-
-    let mut failures = Vec::new();
-    for album_brief in matched {
-        println!(
-            "\n{} {}",
-            cli_style::title("ALBUM"),
-            cli_style::value(&album_brief.name)
-        );
-        match api.get_album_detail(&album_brief.cid).await {
-            Ok(album_detail) => {
-                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
-                    if crate::cli_progress::is_interrupted(&e) {
-                        return Err(e);
-                    }
-                    let message = format!("{}: {}", album_brief.name, e);
-                    eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
-                    failures.push(message);
-                }
-            }
-            Err(e) => {
-                let message = format!("{}: {}", album_brief.name, e);
-                eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
-                failures.push(message);
-            }
-        }
-    }
-
-    if !failures.is_empty() {
-        anyhow::bail!(
-            "{} album(s) failed: {}",
-            failures.len(),
-            failures.join("; ")
-        );
-    }
-
-    Ok(())
-}
-
-pub async fn download_albums_by_id<A: MusicSource>(
-    api: &A,
-    config: &Config,
-    ids: &[String],
-    dry_run: bool,
-    progress_mode: crate::cli_progress::CliProgressMode,
-) -> anyhow::Result<()> {
-    let albums = api.get_albums().await?;
-    let matched: Vec<_> = albums
-        .iter()
-        .filter(|a| ids.iter().any(|id| a.cid.eq_ignore_ascii_case(id)))
-        .collect();
-
-    if matched.is_empty() {
-        anyhow::bail!("no albums matched the given CIDs; use --list to inspect available albums");
-    }
-
-    print_matched_albums("MATCHING", &matched);
-
-    if dry_run {
-        return Ok(());
-    }
-
-    let mut failures = Vec::new();
-    for album_brief in matched {
-        println!(
-            "\n{} {}",
-            cli_style::title("ALBUM"),
-            cli_style::value(&album_brief.name)
-        );
-        match api.get_album_detail(&album_brief.cid).await {
-            Ok(album_detail) => {
-                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
-                    if crate::cli_progress::is_interrupted(&e) {
-                        return Err(e);
-                    }
-                    let message = format!("{}: {}", album_brief.name, e);
-                    eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
-                    failures.push(message);
-                }
-            }
-            Err(e) => {
-                let message = format!("{}: {}", album_brief.name, e);
-                eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
-                failures.push(message);
-            }
-        }
-    }
-
-    if !failures.is_empty() {
-        anyhow::bail!(
-            "{} album(s) failed: {}",
-            failures.len(),
-            failures.join("; ")
-        );
-    }
-
-    Ok(())
-}
-
-fn print_matched_albums(label: &str, albums: &[&crate::models::AlbumBrief]) {
-    println!("{} {} {} ALBUMS", cli_style::msr(), albums.len(), label);
-    for album in albums {
-        println!("  {}  {}", cli_style::dimmed(&album.cid), album.name);
-    }
 }
 
 #[cfg(test)]
@@ -1134,103 +1036,147 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_albums_by_name_errors_when_no_album_matches() {
-        let source = MockSource {
-            albums: vec![album_brief("a", "Alpha")],
-            ..Default::default()
-        };
+    async fn download_album_with_events_emits_expected_events() {
+        let root = test_dir("events");
+        let source = source_for_single_song("mock://song.wav", b"audio", None);
+        let config = test_config(root.clone());
+        let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let error = download_albums_by_name(
+        download_album_with_events(
             &source,
-            &Config::default(),
-            &["missing".to_string()],
-            false,
-            true,
-            crate::cli_progress::CliProgressMode::Summary,
-        )
-        .await
-        .unwrap_err()
-        .to_string();
-
-        assert!(error.contains("no albums matched"));
-    }
-
-    #[tokio::test]
-    async fn download_albums_by_id_dry_run_matches_without_fetching_detail() {
-        let source = MockSource {
-            albums: vec![album_brief("a", "Alpha")],
-            ..Default::default()
-        };
-
-        download_albums_by_id(
-            &source,
-            &Config::default(),
-            &["a".to_string()],
-            true,
-            crate::cli_progress::CliProgressMode::Summary,
+            source.album_details.get("album").unwrap(),
+            &config,
+            tx,
         )
         .await
         .unwrap();
 
-        assert!(source.detail_calls.lock().unwrap().is_empty());
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, DownloadEvent::AlbumStarted { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, DownloadEvent::TrackQueued { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, DownloadEvent::TrackFinished { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, DownloadEvent::AlbumFinished { .. })));
     }
 
     #[tokio::test]
-    async fn download_all_continues_after_album_detail_error() {
-        let mut fail_detail_cids = HashSet::new();
-        fail_detail_cids.insert("bad".to_string());
-        let source = MockSource {
-            albums: vec![album_brief("bad", "Bad"), album_brief("ok", "Ok")],
-            fail_detail_cids,
-            ..Default::default()
-        };
-        let mut config = Config::default();
-        config.download.include.album_info = false;
-        config.download.include.covers = false;
+    async fn events_start_with_album_started_and_end_with_album_finished() {
+        let root = test_dir("event-order");
+        let source = source_for_single_song("mock://song.wav", b"audio", None);
+        let config = test_config(root.clone());
+        let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let error = download_all(
+        download_album_with_events(
             &source,
+            source.album_details.get("album").unwrap(),
             &config,
-            crate::cli_progress::CliProgressMode::Summary,
-            false,
+            tx,
         )
         .await
-        .unwrap_err()
-        .to_string();
+        .unwrap();
 
-        assert!(error.contains("1 album(s) failed"));
-        assert_eq!(
-            *source.detail_calls.lock().unwrap(),
-            vec!["bad".to_string(), "ok".to_string()]
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(events.first(), Some(DownloadEvent::AlbumStarted { .. })),
+            "first event should be AlbumStarted, got {:?}",
+            events.first()
+        );
+        assert!(
+            matches!(events.last(), Some(DownloadEvent::AlbumFinished { .. })),
+            "last event should be AlbumFinished, got {:?}",
+            events.last()
         );
     }
 
     #[tokio::test]
-    async fn download_all_dry_run_lists_without_fetching_detail() {
-        let source = MockSource {
-            albums: vec![album_brief("a", "Alpha"), album_brief("b", "Beta")],
-            ..Default::default()
-        };
+    async fn preflight_failure_emits_album_failed() {
+        let root = test_dir("preflight-fail");
+        let mut source = MockSource::default();
+        let mut album = album_with_songs("album", "Album", &["dup1", "dup2"]);
+        album.songs[1].name = "Same".to_string();
+        album.songs[0].name = "Same".to_string();
+        source
+            .album_details
+            .insert("album".to_string(), album.clone());
+        source
+            .song_details
+            .insert("dup1".to_string(), song_detail("dup1", "Same"));
+        source
+            .song_details
+            .insert("dup2".to_string(), song_detail("dup2", "Same"));
+        let config = test_config(root.clone());
+        let (tx, mut rx) = mpsc::unbounded_channel();
 
-        download_all(
+        let result = download_album_with_events(&source, &album, &config, tx).await;
+
+        assert!(result.is_err());
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            matches!(events.first(), Some(DownloadEvent::AlbumStarted { .. })),
+            "first event should be AlbumStarted"
+        );
+        assert!(
+            matches!(events.last(), Some(DownloadEvent::AlbumFailed { .. })),
+            "last event should be AlbumFailed, got {:?}",
+            events.last()
+        );
+    }
+
+    #[tokio::test]
+    async fn track_failure_emits_track_finished_with_failed_status() {
+        let root = test_dir("track-fail-event");
+        let mut source = MockSource::default();
+        source.album_details.insert(
+            "album".to_string(),
+            album_with_songs("album", "Album", &["bad"]),
+        );
+        source.song_details.insert(
+            "bad".to_string(),
+            song_detail_with_url("bad", "Bad", "mock://bad.wav", None),
+        );
+        source.fail_audio_urls.insert("mock://bad.wav".to_string());
+        let config = test_config(root.clone());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let report = download_album_with_events(
             &source,
-            &Config::default(),
-            crate::cli_progress::CliProgressMode::Summary,
-            true,
+            source.album_details.get("album").unwrap(),
+            &config,
+            tx,
         )
         .await
         .unwrap();
 
-        assert!(source.detail_calls.lock().unwrap().is_empty());
-    }
-
-    fn album_brief(cid: &str, name: &str) -> AlbumBrief {
-        AlbumBrief {
-            cid: cid.to_string(),
-            name: name.to_string(),
-            cover_url: String::new(),
-            artists: Vec::new(),
-        }
+        assert_eq!(report.failed_count(), 1);
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let finished_events: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    DownloadEvent::TrackFinished {
+                        status: SongStatus::Failed,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(
+            finished_events.len(),
+            1,
+            "exactly one TrackFinished(Failed)"
+        );
+        let album_finished = events
+            .iter()
+            .any(|e| matches!(e, DownloadEvent::AlbumFinished { .. }));
+        assert!(album_finished, "AlbumFinished should still be emitted");
     }
 
     fn album_detail(cid: &str, name: &str) -> AlbumDetail {

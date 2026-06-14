@@ -1,5 +1,5 @@
-use crate::models;
-use crate::progress::{AlbumDownloadReport, DownloadProgress};
+use msr_downloader::models;
+use msr_downloader::progress::{AlbumDownloadReport, DownloadProgress};
 use tokio::task::JoinHandle;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

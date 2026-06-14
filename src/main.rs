@@ -1,19 +1,17 @@
-mod api;
 mod cli_progress;
 mod cli_style;
-mod config;
-mod downloader;
-mod file_fetcher;
-mod format;
-mod fs_util;
-mod metadata;
-mod models;
-mod progress;
 mod tui;
 
-use api::ApiClient;
+use msr_downloader::api::ApiClient;
+use msr_downloader::api::MusicSource;
+use msr_downloader::config::Config;
+use msr_downloader::downloader;
+use msr_downloader::models;
+use msr_downloader::progress::{
+    AlbumDownloadReport, DownloadIssue, DownloadIssueKind, DownloadProgress,
+};
+
 use clap::Parser;
-use config::Config;
 use crossterm::{
     cursor,
     event::{
@@ -26,7 +24,6 @@ use crossterm::{
         LeaveAlternateScreen,
     },
 };
-use progress::{AlbumDownloadReport, DownloadIssue, DownloadIssueKind, DownloadProgress};
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -325,6 +322,236 @@ fn validate_cli_action(cli: &Cli) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn download_album<A: MusicSource>(
+    api: &A,
+    album: &models::AlbumDetail,
+    config: &Config,
+    progress_mode: cli_progress::CliProgressMode,
+) -> anyhow::Result<()> {
+    let progress = Arc::new(Mutex::new(DownloadProgress::new(
+        &album.name,
+        album.songs.len(),
+    )));
+    let progress_clone = progress.clone();
+    let download = tokio::spawn({
+        let api = api.clone();
+        let album = album.clone();
+        let config = config.clone();
+        async move {
+            downloader::download_album_with_progress(&api, &album, &config, Some(progress_clone))
+                .await
+        }
+    });
+
+    cli_progress::render_cli_progress(&progress, &download, progress_mode).await?;
+    let report = download.await??;
+    cli_progress::print_cli_report_summary(&report);
+    if report.has_track_failures() {
+        anyhow::bail!(
+            "{} track issue(s): {}",
+            report.track_failure_count(),
+            report
+                .issues
+                .iter()
+                .filter(|issue| issue.kind.is_track_failure())
+                .map(|issue| issue.summary())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+    Ok(())
+}
+
+async fn download_all<A: MusicSource>(
+    api: &A,
+    config: &Config,
+    progress_mode: cli_progress::CliProgressMode,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let albums = api.get_albums().await?;
+    if dry_run {
+        let matched: Vec<_> = albums.iter().collect();
+        print_matched_albums("AVAILABLE", &matched);
+        return Ok(());
+    }
+
+    println!("{} {} ALBUMS", cli_style::msr(), albums.len());
+
+    let mut failures = Vec::new();
+    for (i, album_brief) in albums.iter().enumerate() {
+        println!(
+            "\n{} [{}/{}] {}",
+            cli_style::title("ALBUM"),
+            i + 1,
+            albums.len(),
+            cli_style::value(&album_brief.name)
+        );
+        match api.get_album_detail(&album_brief.cid).await {
+            Ok(album_detail) => {
+                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
+                    if cli_progress::is_interrupted(&e) {
+                        return Err(e);
+                    }
+                    let message = format!("{}: {}", album_brief.name, e);
+                    eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
+                    failures.push(message);
+                }
+            }
+            Err(e) => {
+                let message = format!("{}: {}", album_brief.name, e);
+                eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
+                failures.push(message);
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{} album(s) failed: {}",
+            failures.len(),
+            failures.join("; ")
+        );
+    }
+
+    Ok(())
+}
+
+async fn download_albums_by_name<A: MusicSource>(
+    api: &A,
+    config: &Config,
+    names: &[String],
+    exact: bool,
+    dry_run: bool,
+    progress_mode: cli_progress::CliProgressMode,
+) -> anyhow::Result<()> {
+    let albums = api.get_albums().await?;
+    let matched: Vec<_> = albums
+        .iter()
+        .filter(|a| {
+            names.iter().any(|n| {
+                if exact {
+                    a.name.eq_ignore_ascii_case(n)
+                } else {
+                    a.name.to_lowercase().contains(&n.to_lowercase())
+                }
+            })
+        })
+        .collect();
+
+    if matched.is_empty() {
+        anyhow::bail!("no albums matched the given names; use --list to inspect available albums");
+    }
+
+    print_matched_albums("MATCHING", &matched);
+
+    if dry_run {
+        return Ok(());
+    }
+
+    let mut failures = Vec::new();
+    for album_brief in matched {
+        println!(
+            "\n{} {}",
+            cli_style::title("ALBUM"),
+            cli_style::value(&album_brief.name)
+        );
+        match api.get_album_detail(&album_brief.cid).await {
+            Ok(album_detail) => {
+                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
+                    if cli_progress::is_interrupted(&e) {
+                        return Err(e);
+                    }
+                    let message = format!("{}: {}", album_brief.name, e);
+                    eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
+                    failures.push(message);
+                }
+            }
+            Err(e) => {
+                let message = format!("{}: {}", album_brief.name, e);
+                eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
+                failures.push(message);
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{} album(s) failed: {}",
+            failures.len(),
+            failures.join("; ")
+        );
+    }
+
+    Ok(())
+}
+
+async fn download_albums_by_id<A: MusicSource>(
+    api: &A,
+    config: &Config,
+    ids: &[String],
+    dry_run: bool,
+    progress_mode: cli_progress::CliProgressMode,
+) -> anyhow::Result<()> {
+    let albums = api.get_albums().await?;
+    let matched: Vec<_> = albums
+        .iter()
+        .filter(|a| ids.iter().any(|id| a.cid.eq_ignore_ascii_case(id)))
+        .collect();
+
+    if matched.is_empty() {
+        anyhow::bail!("no albums matched the given CIDs; use --list to inspect available albums");
+    }
+
+    print_matched_albums("MATCHING", &matched);
+
+    if dry_run {
+        return Ok(());
+    }
+
+    let mut failures = Vec::new();
+    for album_brief in matched {
+        println!(
+            "\n{} {}",
+            cli_style::title("ALBUM"),
+            cli_style::value(&album_brief.name)
+        );
+        match api.get_album_detail(&album_brief.cid).await {
+            Ok(album_detail) => {
+                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
+                    if cli_progress::is_interrupted(&e) {
+                        return Err(e);
+                    }
+                    let message = format!("{}: {}", album_brief.name, e);
+                    eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
+                    failures.push(message);
+                }
+            }
+            Err(e) => {
+                let message = format!("{}: {}", album_brief.name, e);
+                eprintln!("{} {}", cli_style::error("ERR"), cli_style::error(&message));
+                failures.push(message);
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{} album(s) failed: {}",
+            failures.len(),
+            failures.join("; ")
+        );
+    }
+
+    Ok(())
+}
+
+fn print_matched_albums(label: &str, albums: &[&models::AlbumBrief]) {
+    println!("{} {} {} ALBUMS", cli_style::msr(), albums.len(), label);
+    for album in albums {
+        println!("  {}  {}", cli_style::dimmed(&album.cid), album.name);
+    }
 }
 
 fn start_tui_download(
@@ -826,7 +1053,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let performed_download = if let Some(names) = cli.album {
-        downloader::download_albums_by_name(
+        download_albums_by_name(
             &api,
             &config,
             &names,
@@ -837,11 +1064,10 @@ async fn main() -> anyhow::Result<()> {
         .await?;
         !cli.dry_run
     } else if let Some(ids) = cli.album_id {
-        downloader::download_albums_by_id(&api, &config, &ids, cli.dry_run, cli_progress_mode)
-            .await?;
+        download_albums_by_id(&api, &config, &ids, cli.dry_run, cli_progress_mode).await?;
         !cli.dry_run
     } else if cli.all {
-        downloader::download_all(&api, &config, cli_progress_mode, cli.dry_run).await?;
+        download_all(&api, &config, cli_progress_mode, cli.dry_run).await?;
         !cli.dry_run
     } else {
         return Err(no_cli_action_error());
@@ -1178,5 +1404,66 @@ mod tests {
         assert!(config.validate().is_ok());
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_albums_by_name_errors_when_no_album_matches() {
+        use async_trait::async_trait;
+        use msr_downloader::models::AlbumBrief;
+
+        #[derive(Clone, Default)]
+        struct MockSource {
+            albums: Vec<AlbumBrief>,
+        }
+
+        #[async_trait]
+        impl MusicSource for MockSource {
+            async fn get_albums(&self) -> anyhow::Result<Vec<AlbumBrief>> {
+                Ok(self.albums.clone())
+            }
+            async fn get_album_detail(&self, _cid: &str) -> anyhow::Result<models::AlbumDetail> {
+                unimplemented!()
+            }
+            async fn get_song(&self, _cid: &str) -> anyhow::Result<models::SongDetail> {
+                unimplemented!()
+            }
+            async fn download_file(&self, _url: &str, _dest: &Path) -> anyhow::Result<()> {
+                unimplemented!()
+            }
+            async fn content_length(&self, _url: &str) -> anyhow::Result<Option<u64>> {
+                unimplemented!()
+            }
+            async fn download_file_with_progress(
+                &self,
+                _url: &str,
+                _dest: &Path,
+                _on_progress: &mut (dyn FnMut(msr_downloader::file_fetcher::FileProgress) + Send),
+            ) -> anyhow::Result<()> {
+                unimplemented!()
+            }
+        }
+
+        let source = MockSource {
+            albums: vec![AlbumBrief {
+                cid: "a".to_string(),
+                name: "Alpha".to_string(),
+                cover_url: String::new(),
+                artists: Vec::new(),
+            }],
+        };
+
+        let error = download_albums_by_name(
+            &source,
+            &Config::default(),
+            &["missing".to_string()],
+            false,
+            true,
+            cli_progress::CliProgressMode::Summary,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("no albums matched"));
     }
 }
