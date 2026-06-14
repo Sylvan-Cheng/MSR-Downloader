@@ -140,18 +140,6 @@ async fn sleep_or_interrupt(duration: std::time::Duration) -> anyhow::Result<()>
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn interrupted_error_is_detectable() {
-        let error: anyhow::Error = CliInterrupted.into();
-
-        assert!(is_interrupted(&error));
-    }
-}
-
 fn draw_cli_progress(progress: &DownloadProgress, previous_lines: usize) -> anyhow::Result<usize> {
     let mut stderr = io::stderr();
     if previous_lines > 0 {
@@ -314,5 +302,17 @@ fn progress_line(ratio: f64, current: u64, total: u64, unit: &str) -> String {
             total,
             unit
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_error_is_detectable() {
+        let error: anyhow::Error = CliInterrupted.into();
+
+        assert!(is_interrupted(&error));
     }
 }

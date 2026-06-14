@@ -89,16 +89,27 @@ pub(crate) fn move_selection(selected: &mut usize, visible_indices: &[usize], de
     *selected = visible_indices[next];
 }
 
-pub(crate) fn draw_select_screen(
-    f: &mut ratatui::Frame,
-    albums: &[models::AlbumBrief],
-    selected: usize,
-    selected_albums: &[bool],
-    is_downloading: bool,
-    search_query: &str,
-    search_active: bool,
-    help_overlay: HelpOverlay,
-) {
+pub(crate) struct SelectScreen<'a> {
+    pub(crate) albums: &'a [models::AlbumBrief],
+    pub(crate) selected: usize,
+    pub(crate) selected_albums: &'a [bool],
+    pub(crate) is_downloading: bool,
+    pub(crate) search_query: &'a str,
+    pub(crate) search_active: bool,
+    pub(crate) help_overlay: HelpOverlay,
+}
+
+pub(crate) fn draw_select_screen(f: &mut ratatui::Frame, screen: SelectScreen<'_>) {
+    let SelectScreen {
+        albums,
+        selected,
+        selected_albums,
+        is_downloading,
+        search_query,
+        search_active,
+        help_overlay,
+    } = screen;
+
     let chunks = app_chunks(f.area());
 
     draw_app_header(

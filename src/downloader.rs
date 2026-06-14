@@ -21,6 +21,17 @@ struct SongDownloadJob {
     progress: Option<Arc<Mutex<DownloadProgress>>>,
 }
 
+struct MetadataWrite<'a> {
+    config: &'a Config,
+    dest: &'a Path,
+    song: &'a SongDetail,
+    album: &'a AlbumDetail,
+    cover_data: Option<&'a [u8]>,
+    lyrics_text: Option<String>,
+    downloaded: bool,
+    progress: &'a Option<Arc<Mutex<DownloadProgress>>>,
+}
+
 pub async fn download_album<A: MusicSource>(
     api: &A,
     album: &AlbumDetail,
@@ -354,16 +365,16 @@ async fn download_song_with_progress<A: MusicSource>(
         set_progress_status(&progress, current, &song.name, SongStatus::Tagging);
     }
 
-    write_metadata_if_needed(
-        &config,
-        &final_dest,
-        &song,
-        &album,
-        cover_data.as_deref(),
+    write_metadata_if_needed(MetadataWrite {
+        config: &config,
+        dest: &final_dest,
+        song: &song,
+        album: &album,
+        cover_data: cover_data.as_deref(),
         lyrics_text,
         downloaded,
-        &progress,
-    )?;
+        progress: &progress,
+    })?;
 
     if downloaded {
         finish_progress(&progress, current, false, false);
@@ -569,16 +580,18 @@ fn convert_if_needed(
     }
 }
 
-fn write_metadata_if_needed(
-    config: &Config,
-    dest: &Path,
-    song: &SongDetail,
-    album: &AlbumDetail,
-    cover_data: Option<&[u8]>,
-    lyrics_text: Option<String>,
-    downloaded: bool,
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
-) -> anyhow::Result<()> {
+fn write_metadata_if_needed(args: MetadataWrite<'_>) -> anyhow::Result<()> {
+    let MetadataWrite {
+        config,
+        dest,
+        song,
+        album,
+        cover_data,
+        lyrics_text,
+        downloaded,
+        progress,
+    } = args;
+
     if !config.download.include.metadata || (!downloaded && dest.exists()) {
         return Ok(());
     }

@@ -38,7 +38,7 @@ use tui::layout::{app_chunks, contains_point, page_step, select_body_chunks};
 use tui::overlay::draw_help_overlay;
 use tui::select::{
     draw_select_screen, ensure_visible_selection, filtered_album_indices, move_selection,
-    selected_visible_position,
+    selected_visible_position, SelectScreen,
 };
 use tui::state::{AlbumMouseAction, AppScreen, DownloadScreen, HelpOverlay, TuiState};
 
@@ -462,13 +462,15 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                 terminal.draw(|f| {
                     draw_select_screen(
                         f,
-                        &albums,
-                        state.selected,
-                        &state.selected_albums,
-                        download_handle.is_some(),
-                        &state.search_query,
-                        state.search_active,
-                        state.help_overlay,
+                        SelectScreen {
+                            albums: &albums,
+                            selected: state.selected,
+                            selected_albums: &state.selected_albums,
+                            is_downloading: download_handle.is_some(),
+                            search_query: &state.search_query,
+                            search_active: state.search_active,
+                            help_overlay: state.help_overlay,
+                        },
                     );
                 })?;
 
@@ -604,9 +606,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                             mouse.column,
                                             mouse.row,
                                         ) {
-                                            let index = match action {
-                                                AlbumMouseAction::Toggle(index) => index,
-                                            };
+                                            let AlbumMouseAction::Toggle(index) = action;
                                             if let Some(&album_index) = visible_indices.get(index) {
                                                 state.selected = album_index;
                                                 if matches!(action, AlbumMouseAction::Toggle(_))
