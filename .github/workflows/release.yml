@@ -21,7 +21,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ inputs.tag }}
         run: |
-          if ! gh release view "$TAG_NAME" > /dev/null 2>&1; then
+          if gh release view "$TAG_NAME" --json tagName --jq .tagName 2>/dev/null | grep -q "$TAG_NAME"; then
+            echo "Release $TAG_NAME already exists"
+          else
             gh release create "$TAG_NAME" --title "$TAG_NAME" --generate-notes
           fi
 
