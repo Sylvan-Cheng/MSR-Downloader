@@ -203,6 +203,7 @@ mod tests {
         std::fs::write(&flac_path, b"flac").unwrap();
 
         let mut config = Config::default();
+        config.download.convert.enabled = false;
         let song = song_detail("1", "song");
         assert!(existing_converted_dest(&config, &wav_path, &song).is_none());
 

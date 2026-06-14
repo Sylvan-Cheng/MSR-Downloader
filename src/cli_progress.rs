@@ -1,6 +1,6 @@
 use crate::cli_style;
 use crate::format;
-use crate::progress::{DownloadProgress, SongStatus};
+use crate::progress::{AlbumDownloadReport, DownloadIssueKind, DownloadProgress, SongStatus};
 use crossterm::{
     cursor, execute,
     terminal::{Clear, ClearType},
@@ -37,7 +37,7 @@ pub(crate) fn is_interrupted(error: &anyhow::Error) -> bool {
 
 pub(crate) async fn render_cli_progress(
     progress: &Arc<Mutex<DownloadProgress>>,
-    handle: &tokio::task::JoinHandle<anyhow::Result<()>>,
+    handle: &tokio::task::JoinHandle<anyhow::Result<AlbumDownloadReport>>,
     progress_mode: CliProgressMode,
 ) -> anyhow::Result<()> {
     if matches!(progress_mode, CliProgressMode::Summary) {
@@ -71,15 +71,14 @@ pub(crate) async fn render_cli_progress(
 
     if let Ok(snapshot) = progress.lock().map(|progress| progress.clone()) {
         draw_cli_progress(&snapshot, rendered_lines)?;
-        print_cli_summary(&snapshot);
     }
     eprintln!();
     Ok(())
 }
 
 async fn render_summary_only_cli_progress(
-    progress: &Arc<Mutex<DownloadProgress>>,
-    handle: &tokio::task::JoinHandle<anyhow::Result<()>>,
+    _progress: &Arc<Mutex<DownloadProgress>>,
+    handle: &tokio::task::JoinHandle<anyhow::Result<AlbumDownloadReport>>,
 ) -> anyhow::Result<()> {
     while !handle.is_finished() {
         if let Err(error) = sleep_or_interrupt(std::time::Duration::from_millis(250)).await {
@@ -87,16 +86,12 @@ async fn render_summary_only_cli_progress(
             return Err(error);
         }
     }
-
-    if let Ok(snapshot) = progress.lock().map(|progress| progress.clone()) {
-        print_cli_summary(&snapshot);
-    }
     Ok(())
 }
 
 async fn render_plain_cli_progress(
     progress: &Arc<Mutex<DownloadProgress>>,
-    handle: &tokio::task::JoinHandle<anyhow::Result<()>>,
+    handle: &tokio::task::JoinHandle<anyhow::Result<AlbumDownloadReport>>,
 ) -> anyhow::Result<()> {
     let mut last_completed = usize::MAX;
     let mut last_tick = Instant::now();
@@ -124,9 +119,6 @@ async fn render_plain_cli_progress(
         }
     }
 
-    if let Ok(snapshot) = progress.lock().map(|progress| progress.clone()) {
-        print_cli_summary(&snapshot);
-    }
     Ok(())
 }
 
@@ -254,26 +246,48 @@ fn print_plain_progress(progress: &DownloadProgress) {
     }
 }
 
-fn print_cli_summary(progress: &DownloadProgress) {
-    let has_issues = progress.failed_count() > 0 || !progress.errors.is_empty();
+pub(crate) fn print_cli_report_summary(report: &AlbumDownloadReport) {
+    let has_issues = report.has_track_failures() || !report.issues.is_empty();
     let status = if has_issues {
         cli_style::error("MSR// TRANSFER INCOMPLETE")
     } else {
         cli_style::title("MSR// TRANSFER SUMMARY")
     };
     eprintln!("\n{}", status);
+    eprintln!("  ALBUM   {}", report.album_name);
     eprintln!(
-        "  TRACKS  {} ok / {} skipped / {} failed",
-        progress.ok_count(),
-        progress.skipped_count(),
-        progress.failed_count()
+        "  TRACKS  {} total / {} ok / {} skipped / {} failed",
+        report.total_tracks,
+        report.ok_count(),
+        report.skipped_count(),
+        report.failed_count()
     );
-    if progress.errors.is_empty() {
+    if !report.issues.is_empty() {
+        eprintln!(
+            "  ISSUES  {} audio / {} auxiliary / {} cover / {} lyrics / {} metadata / {} other",
+            report.issue_count(DownloadIssueKind::Audio),
+            report.auxiliary_issue_count(),
+            report.issue_count(DownloadIssueKind::Cover),
+            report.issue_count(DownloadIssueKind::Lyrics),
+            report.issue_count(DownloadIssueKind::Metadata),
+            report.issue_count(DownloadIssueKind::Album)
+                + report.issue_count(DownloadIssueKind::Task)
+        );
+    }
+    if report.issues.is_empty() {
         return;
     }
     eprintln!("  FAILED");
-    for error in progress.errors.iter().rev().take(5).rev() {
-        eprintln!("  ERR  {}", error);
+    for track in report
+        .tracks
+        .iter()
+        .filter(|track| track.status == SongStatus::Failed)
+        .take(5)
+    {
+        eprintln!("  ERR  audio {}", track.name);
+    }
+    for issue in report.issues.iter().rev().take(5).rev() {
+        eprintln!("  ERR  {}", issue.summary());
     }
 }
 

@@ -44,7 +44,7 @@ pub struct AlbumDetail {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SongDetail {
     pub cid: String,
     pub name: String,

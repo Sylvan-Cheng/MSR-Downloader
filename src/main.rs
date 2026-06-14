@@ -26,7 +26,7 @@ use crossterm::{
         LeaveAlternateScreen,
     },
 };
-use progress::DownloadProgress;
+use progress::{AlbumDownloadReport, DownloadIssue, DownloadIssueKind, DownloadProgress};
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -220,8 +220,8 @@ album_info = true
 metadata = true
 
 [download.convert]
-enabled = false
-wav_to_flac = false
+enabled = true
+wav_to_flac = true
 delete_original = true
 flac_compression = 5
 
@@ -268,7 +268,7 @@ fn collect_partial_files(dir: &std::path::Path, files: &mut Vec<PathBuf>) -> any
         } else if path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".part"))
+            .is_some_and(|name| name.ends_with(".part") || name.ends_with(".part.meta"))
         {
             files.push(path);
         }
@@ -333,7 +333,7 @@ fn start_tui_download(
     albums: &[models::AlbumBrief],
     state: &mut TuiState,
     progress: &Arc<Mutex<DownloadProgress>>,
-) -> Option<JoinHandle<anyhow::Result<Vec<String>>>> {
+) -> Option<JoinHandle<anyhow::Result<Vec<AlbumDownloadReport>>>> {
     state.start_queue();
     if state.download_queue.is_empty() {
         return None;
@@ -361,7 +361,11 @@ fn start_tui_download(
                 Err(e) => {
                     let message = format!("Album {} detail error: {}", album.name, e);
                     if let Ok(mut prog) = progress_clone.lock() {
-                        prog.errors.push(message.clone());
+                        prog.push_issue(DownloadIssue::new(
+                            DownloadIssueKind::Album,
+                            album.name.as_str(),
+                            message.clone(),
+                        ));
                     }
                     failures.push(message);
                     continue;
@@ -372,31 +376,33 @@ fn start_tui_download(
                 *prog = DownloadProgress::new(&album_detail.name, album_detail.songs.len());
             }
 
-            downloader::download_album_with_progress(
+            match downloader::download_album_with_progress(
                 &api_clone,
                 &album_detail,
                 &config_clone,
                 Some(progress_clone.clone()),
             )
             .await
-            .map(|_| downloaded.push(album.name.clone()))
-            .unwrap_or_else(|e| {
-                let message = format!("Album {} download error: {}", album.name, e);
-                if let Ok(mut prog) = progress_clone.lock() {
-                    prog.errors.push(message.clone());
+            {
+                Ok(report) if report.has_track_failures() => {
+                    downloaded.push(report);
                 }
-                failures.push(message);
-            });
+                Ok(report) => downloaded.push(report),
+                Err(e) => {
+                    let message = format!("Album {} download error: {}", album.name, e);
+                    if let Ok(mut prog) = progress_clone.lock() {
+                        prog.push_issue(DownloadIssue::new(
+                            DownloadIssueKind::Album,
+                            album.name.as_str(),
+                            message.clone(),
+                        ));
+                    }
+                    failures.push(message);
+                }
+            }
         }
 
         if !failures.is_empty() {
-            if let Ok(mut prog) = progress_clone.lock() {
-                for failure in &failures {
-                    if !prog.errors.contains(failure) {
-                        prog.errors.push(failure.clone());
-                    }
-                }
-            }
             anyhow::bail!(
                 "{} album(s) failed: {}",
                 failures.len(),
@@ -425,7 +431,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = TuiState::new(albums.len());
-    let mut download_handle: Option<JoinHandle<anyhow::Result<Vec<String>>>> = None;
+    let mut download_handle: Option<JoinHandle<anyhow::Result<Vec<AlbumDownloadReport>>>> = None;
 
     let progress = Arc::new(Mutex::new(DownloadProgress::new("", 0)));
 
@@ -434,18 +440,31 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
             if handle.is_finished() {
                 if let Some(handle) = download_handle.take() {
                     match handle.await {
-                        Ok(Ok(names)) => {
-                            state.downloaded_names = names;
+                        Ok(Ok(reports)) => {
+                            state.downloaded_names = reports
+                                .iter()
+                                .map(|report| report.album_name.clone())
+                                .collect();
+                            state.download_reports = reports;
                         }
                         Ok(Err(e)) => {
                             if let Ok(mut prog) = progress.lock() {
-                                prog.errors.push(format!("Download error: {}", e));
+                                prog.push_issue(DownloadIssue::new(
+                                    DownloadIssueKind::Task,
+                                    "",
+                                    format!("Download error: {}", e),
+                                ));
                             }
                         }
                         Err(e) => {
                             state.downloaded_names.clear();
+                            state.download_reports.clear();
                             if let Ok(mut prog) = progress.lock() {
-                                prog.errors.push(format!("Task error: {}", e));
+                                prog.push_issue(DownloadIssue::new(
+                                    DownloadIssueKind::Task,
+                                    "",
+                                    format!("Task error: {}", e),
+                                ));
                             }
                         }
                     }
@@ -645,6 +664,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                 current: state.download_current + 1,
                                 total: state.download_queue.len(),
                                 progress: &prog,
+                                reports: &state.download_reports,
                                 downloaded: &state.downloaded_names,
                                 done: state.transfer_done,
                                 confirm_quit: state.confirm_quit,
@@ -936,14 +956,16 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(root.join("keep.txt"), b"keep").unwrap();
         std::fs::write(root.join("track.mp3.part"), b"partial").unwrap();
+        std::fs::write(root.join("track.mp3.part.meta"), b"meta").unwrap();
         std::fs::write(nested.join("cover.jpg.part"), b"partial").unwrap();
 
         let mut files = Vec::new();
         collect_partial_files(&root, &mut files).unwrap();
         files.sort();
 
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 3);
         assert!(files.contains(&root.join("track.mp3.part")));
+        assert!(files.contains(&root.join("track.mp3.part.meta")));
         assert!(files.contains(&nested.join("cover.jpg.part")));
 
         std::fs::remove_dir_all(root).unwrap();
@@ -1040,7 +1062,7 @@ mod tests {
     #[test]
     fn tui_state_confirm_or_quit_without_transfer_returns_true() {
         let mut state = TuiState::new(3);
-        let handle: Option<JoinHandle<anyhow::Result<Vec<String>>>> = None;
+        let handle: Option<JoinHandle<anyhow::Result<Vec<AlbumDownloadReport>>>> = None;
 
         assert!(state.confirm_or_quit(&handle));
         assert!(!state.confirm_quit);
@@ -1115,6 +1137,8 @@ mod tests {
 
         assert!(config.validate().is_ok());
         assert_eq!(config.download.output_dir, PathBuf::from("./MSR_Albums"));
+        assert!(config.download.convert.enabled);
+        assert!(config.download.convert.wav_to_flac);
     }
 
     #[test]

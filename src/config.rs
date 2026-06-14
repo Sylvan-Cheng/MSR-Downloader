@@ -54,15 +54,11 @@ fn default_true() -> bool {
     true
 }
 
-fn default_false() -> bool {
-    false
-}
-
 #[derive(Debug, Deserialize, Clone)]
 pub struct ConvertConfig {
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub wav_to_flac: bool,
     #[serde(default = "default_true")]
     pub delete_original: bool,
@@ -73,8 +69,8 @@ pub struct ConvertConfig {
 impl Default for ConvertConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            wav_to_flac: false,
+            enabled: true,
+            wav_to_flac: true,
             delete_original: true,
             flac_compression: 5,
         }
@@ -244,8 +240,8 @@ mod tests {
         assert!(config.download.include.lyrics);
         assert!(config.download.include.covers);
         assert!(config.download.include.metadata);
-        assert!(!config.download.convert.enabled);
-        assert!(!config.download.convert.wav_to_flac);
+        assert!(config.download.convert.enabled);
+        assert!(config.download.convert.wav_to_flac);
     }
 
     #[test]

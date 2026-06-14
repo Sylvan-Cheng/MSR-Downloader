@@ -1,6 +1,6 @@
 use crate::format;
 use crate::models;
-use crate::progress::DownloadProgress;
+use crate::progress::{AlbumDownloadReport, DownloadProgress};
 use crate::tui::chrome::{
     controls_line, create_block, draw_app_header, draw_controls_bar, draw_status_bar,
 };
@@ -31,6 +31,7 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
         current,
         total,
         progress,
+        reports,
         downloaded,
         done,
         confirm_quit,
@@ -40,7 +41,7 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
     let is_idle = is_transfer_idle(done, total, progress.total_songs);
     let title_color = if is_idle {
         COLOR_MUTED
-    } else if done && (progress.failed_count() > 0 || !progress.errors.is_empty()) {
+    } else if done && has_done_issues(progress, reports) {
         COLOR_ERROR
     } else if done {
         COLOR_SUCCESS
@@ -50,12 +51,12 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
     let title_text = if is_idle {
         "TRANSFER IDLE / NO ACTIVE QUEUE".to_string()
     } else if done {
-        if progress.failed_count() > 0 || !progress.errors.is_empty() {
+        if has_done_issues(progress, reports) {
             format!(
                 "TRANSFER INCOMPLETE / {} OK / {} ISSUE{}",
-                progress.ok_count(),
-                progress.failed_count() + progress.errors.len(),
-                if progress.failed_count() + progress.errors.len() == 1 {
+                done_ok_count(progress, reports),
+                done_issue_count(progress, reports),
+                if done_issue_count(progress, reports) == 1 {
                     ""
                 } else {
                     "S"
@@ -92,7 +93,7 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
         .enumerate()
         .filter(|(idx, _)| !is_idle && (selected_albums[*idx] || *idx == current_album_idx))
         .map(|(i, a)| {
-            let incomplete = done && (progress.failed_count() > 0 || !progress.errors.is_empty());
+            let incomplete = done && has_done_issues(progress, reports);
             let queue_pos = current.saturating_sub(1);
             let album_pos = selected_albums[..i]
                 .iter()
@@ -148,20 +149,20 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
         let mut lines = vec![Line::from(vec![
             Span::styled("TRACKS  ", Style::default().fg(COLOR_MUTED)),
             Span::styled(
-                format!("{} OK", progress.ok_count()),
+                format!("{} OK", done_ok_count(progress, reports)),
                 Style::default()
                     .fg(COLOR_SUCCESS)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" / "),
             Span::styled(
-                format!("{} SKIPPED", progress.skipped_count()),
+                format!("{} SKIPPED", done_skipped_count(progress, reports)),
                 Style::default().fg(COLOR_WARNING),
             ),
             Span::raw(" / "),
             Span::styled(
-                format!("{} FAILED", progress.failed_count()),
-                Style::default().fg(if progress.failed_count() > 0 {
+                format!("{} FAILED", done_failed_count(progress, reports)),
+                Style::default().fg(if done_failed_count(progress, reports) > 0 {
                     COLOR_ERROR
                 } else {
                     COLOR_MUTED
@@ -169,7 +170,7 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
             ),
         ])];
 
-        if progress.failed_count() > 0 || !progress.errors.is_empty() {
+        if has_done_issues(progress, reports) {
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
                 "ISSUES",
@@ -188,7 +189,7 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
                     Span::raw(task.name.clone()),
                 ]));
             }
-            for error in progress.errors.iter().take(8) {
+            for error in done_issue_summaries(progress, reports).into_iter().take(8) {
                 lines.push(Line::from(vec![
                     Span::styled("ERR ", Style::default().fg(COLOR_ERROR)),
                     Span::raw(error.clone()),
@@ -254,7 +255,15 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
         }
     }
 
-    let status_text = download_status_text(confirm_quit, is_idle, done, current, total, progress);
+    let status_text = download_status_text(
+        confirm_quit,
+        is_idle,
+        done,
+        current,
+        total,
+        progress,
+        reports,
+    );
     draw_status_bar(f, chunks[2], status_text);
     draw_controls_bar(
         f,
@@ -270,26 +279,27 @@ pub(crate) fn download_status_text(
     current_album: usize,
     total_albums: usize,
     progress: &DownloadProgress,
+    reports: &[AlbumDownloadReport],
 ) -> String {
     if confirm_quit {
         "ABORT CONFIRMATION: PARTIAL .part FILES WILL BE KEPT FOR RESUME".to_string()
     } else if is_idle {
         "NO ACTIVE TRANSFER".to_string()
     } else if done {
-        let issue_count = progress.failed_count() + progress.errors.len();
+        let issue_count = done_issue_count(progress, reports);
         if issue_count > 0 {
             format!(
                 "INCOMPLETE: {} OK / {} SKIPPED / {} ISSUE{}",
-                progress.ok_count(),
-                progress.skipped_count(),
+                done_ok_count(progress, reports),
+                done_skipped_count(progress, reports),
                 issue_count,
                 if issue_count == 1 { "" } else { "S" }
             )
         } else {
             format!(
                 "COMPLETE: {} OK / {} SKIPPED",
-                progress.ok_count(),
-                progress.skipped_count()
+                done_ok_count(progress, reports),
+                done_skipped_count(progress, reports)
             )
         }
     } else if let Some(error) = progress.errors.last() {
@@ -318,6 +328,59 @@ pub(crate) fn download_status_text(
             if tracks_left == 1 { "" } else { "S" }
         )
     }
+}
+
+fn done_ok_count(progress: &DownloadProgress, reports: &[AlbumDownloadReport]) -> usize {
+    if reports.is_empty() {
+        progress.ok_count()
+    } else {
+        reports.iter().map(AlbumDownloadReport::ok_count).sum()
+    }
+}
+
+fn done_skipped_count(progress: &DownloadProgress, reports: &[AlbumDownloadReport]) -> usize {
+    if reports.is_empty() {
+        progress.skipped_count()
+    } else {
+        reports.iter().map(AlbumDownloadReport::skipped_count).sum()
+    }
+}
+
+fn done_failed_count(progress: &DownloadProgress, reports: &[AlbumDownloadReport]) -> usize {
+    if reports.is_empty() {
+        progress.failed_count()
+    } else {
+        reports.iter().map(AlbumDownloadReport::failed_count).sum()
+    }
+}
+
+fn done_issue_count(progress: &DownloadProgress, reports: &[AlbumDownloadReport]) -> usize {
+    if reports.is_empty() {
+        progress.failed_count() + progress.errors.len()
+    } else {
+        reports
+            .iter()
+            .map(|report| report.track_failure_count() + report.auxiliary_issue_count())
+            .sum()
+    }
+}
+
+fn has_done_issues(progress: &DownloadProgress, reports: &[AlbumDownloadReport]) -> bool {
+    done_issue_count(progress, reports) > 0
+}
+
+fn done_issue_summaries(
+    progress: &DownloadProgress,
+    reports: &[AlbumDownloadReport],
+) -> Vec<String> {
+    if reports.is_empty() {
+        return progress.errors.clone();
+    }
+
+    reports
+        .iter()
+        .flat_map(|report| report.issues.iter().map(|issue| issue.summary()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -360,11 +423,11 @@ mod tests {
         let progress = DownloadProgress::new("", 0);
 
         assert_eq!(
-            download_status_text(true, false, false, 1, 1, &progress),
+            download_status_text(true, false, false, 1, 1, &progress, &[]),
             "ABORT CONFIRMATION: PARTIAL .part FILES WILL BE KEPT FOR RESUME"
         );
         assert_eq!(
-            download_status_text(false, true, false, 1, 0, &progress),
+            download_status_text(false, true, false, 1, 0, &progress, &[]),
             "NO ACTIVE TRANSFER"
         );
     }
@@ -379,7 +442,7 @@ mod tests {
         task.speed_bps = 1024.0 * 1024.0;
 
         assert_eq!(
-            download_status_text(false, false, false, 1, 2, &progress),
+            download_status_text(false, false, false, 1, 2, &progress, &[]),
             "ACTIVE: 1 TRACK / 1.0 MB/s / ETA 00:01 / 1 ALBUM LEFT / 1 TRACK LEFT"
         );
     }
@@ -391,13 +454,13 @@ mod tests {
         progress.task_mut_or_insert(2, "skip", SongStatus::Skipped);
 
         assert_eq!(
-            download_status_text(false, false, true, 1, 1, &progress),
+            download_status_text(false, false, true, 1, 1, &progress, &[]),
             "COMPLETE: 1 OK / 1 SKIPPED"
         );
 
         progress.task_mut_or_insert(3, "failed", SongStatus::Failed);
         assert_eq!(
-            download_status_text(false, false, true, 1, 1, &progress),
+            download_status_text(false, false, true, 1, 1, &progress, &[]),
             "INCOMPLETE: 1 OK / 1 SKIPPED / 1 ISSUE"
         );
     }

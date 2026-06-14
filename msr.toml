@@ -13,8 +13,8 @@ album_info = true
 metadata = true
 
 [download.convert]
-enabled = false
-wav_to_flac = false
+enabled = true
+wav_to_flac = true
 delete_original = true
 flac_compression = 5
 

@@ -12,6 +12,62 @@ pub enum SongStatus {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DownloadIssueKind {
+    Audio,
+    Cover,
+    Lyrics,
+    Metadata,
+    Album,
+    Task,
+}
+
+impl DownloadIssueKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Audio => "audio",
+            Self::Cover => "cover",
+            Self::Lyrics => "lyrics",
+            Self::Metadata => "metadata",
+            Self::Album => "album",
+            Self::Task => "task",
+        }
+    }
+
+    pub fn is_track_failure(self) -> bool {
+        matches!(self, Self::Audio | Self::Task)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DownloadIssue {
+    pub kind: DownloadIssueKind,
+    pub item: String,
+    pub message: String,
+}
+
+impl DownloadIssue {
+    pub fn new(
+        kind: DownloadIssueKind,
+        item: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            item: item.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        if self.item.is_empty() {
+            format!("{}: {}", self.kind.label(), self.message)
+        } else {
+            format!("{} {}: {}", self.kind.label(), self.item, self.message)
+        }
+    }
+}
+
 impl SongStatus {
     pub fn code(self) -> &'static str {
         match self {
@@ -87,6 +143,92 @@ pub struct DownloadProgress {
     pub completed_songs: usize,
     pub tasks: Vec<SongProgress>,
     pub errors: Vec<String>,
+    pub issues: Vec<DownloadIssue>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrackDownloadReport {
+    pub index: usize,
+    pub name: String,
+    pub status: SongStatus,
+}
+
+#[derive(Clone, Debug)]
+pub struct AlbumDownloadReport {
+    pub album_name: String,
+    pub total_tracks: usize,
+    pub tracks: Vec<TrackDownloadReport>,
+    pub issues: Vec<DownloadIssue>,
+}
+
+impl AlbumDownloadReport {
+    pub fn from_progress(progress: &DownloadProgress) -> Self {
+        let mut tracks: Vec<_> = progress
+            .tasks
+            .iter()
+            .map(|task| TrackDownloadReport {
+                index: task.index,
+                name: task.name.clone(),
+                status: task.status,
+            })
+            .collect();
+        tracks.sort_by_key(|track| track.index);
+
+        Self {
+            album_name: progress.album_name.clone(),
+            total_tracks: progress.total_songs,
+            tracks,
+            issues: progress.issues.clone(),
+        }
+    }
+
+    pub fn failed_count(&self) -> usize {
+        self.tracks
+            .iter()
+            .filter(|track| track.status == SongStatus::Failed)
+            .count()
+    }
+
+    pub fn skipped_count(&self) -> usize {
+        self.tracks
+            .iter()
+            .filter(|track| track.status == SongStatus::Skipped)
+            .count()
+    }
+
+    pub fn ok_count(&self) -> usize {
+        self.tracks
+            .iter()
+            .filter(|track| track.status == SongStatus::Done)
+            .count()
+    }
+
+    pub fn track_failure_count(&self) -> usize {
+        self.failed_count()
+            + self
+                .issues
+                .iter()
+                .filter(|issue| issue.kind.is_track_failure())
+                .count()
+    }
+
+    pub fn has_track_failures(&self) -> bool {
+        self.track_failure_count() > 0
+    }
+
+    pub fn issue_count(&self, kind: DownloadIssueKind) -> usize {
+        self.issues
+            .iter()
+            .filter(|issue| issue.kind == kind)
+            .count()
+    }
+
+    pub fn auxiliary_issue_count(&self) -> usize {
+        self.issues
+            .iter()
+            .filter(|issue| !issue.kind.is_track_failure())
+            .count()
+    }
 }
 
 impl DownloadProgress {
@@ -97,6 +239,7 @@ impl DownloadProgress {
             completed_songs: 0,
             tasks: Vec::new(),
             errors: Vec::new(),
+            issues: Vec::new(),
         }
     }
 
@@ -128,6 +271,11 @@ impl DownloadProgress {
                 )
             })
             .count()
+    }
+
+    pub fn push_issue(&mut self, issue: DownloadIssue) {
+        self.errors.push(issue.summary());
+        self.issues.push(issue);
     }
 
     pub fn total_speed_bps(&self) -> f64 {

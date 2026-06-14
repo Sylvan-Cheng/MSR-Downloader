@@ -1,4 +1,5 @@
 use id3::TagLike;
+use metaflac::{block::PictureType, Tag};
 use std::path::Path;
 
 pub fn write_metadata(
@@ -76,17 +77,35 @@ fn image_mime_type(data: &[u8]) -> &'static str {
 
 fn write_flac_metadata(
     path: &Path,
-    _title: &str,
-    _artist: &str,
-    _album: &str,
-    _track: u32,
-    _cover_data: Option<&[u8]>,
-    _lyrics: Option<&str>,
+    title: &str,
+    artist: &str,
+    album: &str,
+    track: u32,
+    cover_data: Option<&[u8]>,
+    lyrics: Option<&str>,
 ) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "FLAC metadata writing is not supported yet for {}; audio file was kept unchanged",
-        path.display()
-    )
+    let mut tag = Tag::read_from_path(path)?;
+
+    tag.set_vorbis("TITLE", vec![title]);
+    tag.set_vorbis("ARTIST", vec![artist]);
+    tag.set_vorbis("ALBUM", vec![album]);
+    tag.set_vorbis("TRACKNUMBER", vec![track.to_string()]);
+
+    if let Some(text) = lyrics {
+        tag.set_vorbis("LYRICS", vec![text]);
+    }
+
+    if let Some(data) = cover_data {
+        tag.remove_picture_type(PictureType::CoverFront);
+        tag.add_picture(
+            image_mime_type(data),
+            PictureType::CoverFront,
+            data.to_vec(),
+        );
+    }
+
+    tag.save()?;
+    Ok(())
 }
 
 pub fn convert_wav_to_flac(
@@ -127,13 +146,47 @@ mod tests {
     }
 
     #[test]
-    fn test_write_metadata_flac_reports_unsupported() {
-        let path = Path::new("test.flac");
-        let error = write_metadata(path, "title", "artist", "album", 1, None, None)
-            .unwrap_err()
-            .to_string();
+    fn test_write_metadata_flac_writes_vorbis_comments_and_cover() {
+        let path = test_file("metadata.flac");
+        write_minimal_flac(&path);
+        let cover = [0xFF, 0xD8, 0xFF, 0x00];
 
-        assert!(error.contains("FLAC metadata writing is not supported yet"));
+        write_metadata(
+            &path,
+            "title",
+            "artist",
+            "album",
+            7,
+            Some(&cover),
+            Some("lyrics"),
+        )
+        .unwrap();
+
+        let tag = Tag::read_from_path(&path).unwrap();
+        assert_eq!(
+            tag.get_vorbis("TITLE").unwrap().collect::<Vec<_>>(),
+            ["title"]
+        );
+        assert_eq!(
+            tag.get_vorbis("ARTIST").unwrap().collect::<Vec<_>>(),
+            ["artist"]
+        );
+        assert_eq!(
+            tag.get_vorbis("ALBUM").unwrap().collect::<Vec<_>>(),
+            ["album"]
+        );
+        assert_eq!(
+            tag.get_vorbis("TRACKNUMBER").unwrap().collect::<Vec<_>>(),
+            ["7"]
+        );
+        assert_eq!(
+            tag.get_vorbis("LYRICS").unwrap().collect::<Vec<_>>(),
+            ["lyrics"]
+        );
+        let picture = tag.pictures().next().unwrap();
+        assert_eq!(picture.picture_type, PictureType::CoverFront);
+        assert_eq!(picture.mime_type, "image/jpeg");
+        assert_eq!(picture.data, cover);
     }
 
     #[test]
@@ -142,5 +195,27 @@ mod tests {
         assert_eq!(image_mime_type(b"\x89PNG\r\n\x1a\nrest"), "image/png");
         assert_eq!(image_mime_type(b"RIFFxxxxWEBPrest"), "image/webp");
         assert_eq!(image_mime_type(b"unknown"), "image/jpeg");
+    }
+
+    fn write_minimal_flac(path: &Path) {
+        let mut bytes = b"fLaC".to_vec();
+        bytes.push(0x80);
+        bytes.extend_from_slice(&[0, 0, 34]);
+        bytes.extend_from_slice(&[0; 34]);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn test_file(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "msr-metadata-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            name
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
     }
 }

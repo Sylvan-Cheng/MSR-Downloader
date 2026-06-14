@@ -123,8 +123,8 @@ album_info = true
 metadata = true
 
 [download.convert]
-enabled = false
-wav_to_flac = false
+enabled = true
+wav_to_flac = true
 delete_original = true
 flac_compression = 5
 
@@ -157,8 +157,8 @@ msr-downloader --clean-parts --yes
 
 - 默认下载到 `./MSR_Albums`。
 - 网络错误会自动重试，下载中断后通常可以续传。
+- 默认会把 WAV 自动转换为 FLAC，并写入 FLAC 元数据，避免 WAV 标签兼容性问题。
 - WAV 转 FLAC 不需要额外安装工具。
-- FLAC 元数据写入暂不支持；如果需要 FLAC 标签，请下载后用专门工具写入。
 
 ## 许可证
 

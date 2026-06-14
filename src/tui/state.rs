@@ -1,5 +1,5 @@
 use crate::models;
-use crate::progress::DownloadProgress;
+use crate::progress::{AlbumDownloadReport, DownloadProgress};
 use tokio::task::JoinHandle;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +26,7 @@ pub(crate) struct DownloadScreen<'a> {
     pub(crate) current: usize,
     pub(crate) total: usize,
     pub(crate) progress: &'a DownloadProgress,
+    pub(crate) reports: &'a [AlbumDownloadReport],
     pub(crate) downloaded: &'a [String],
     pub(crate) done: bool,
     pub(crate) confirm_quit: bool,
@@ -39,6 +40,7 @@ pub(crate) struct TuiState {
     pub(crate) search_active: bool,
     pub(crate) help_overlay: HelpOverlay,
     pub(crate) downloaded_names: Vec<String>,
+    pub(crate) download_reports: Vec<AlbumDownloadReport>,
     pub(crate) download_queue: Vec<usize>,
     pub(crate) download_current: usize,
     pub(crate) transfer_done: bool,
@@ -56,6 +58,7 @@ impl TuiState {
             search_active: false,
             help_overlay: HelpOverlay::Hidden,
             downloaded_names: Vec::new(),
+            download_reports: Vec::new(),
             download_queue: Vec::new(),
             download_current: 0,
             transfer_done: false,
@@ -66,7 +69,7 @@ impl TuiState {
 
     pub(crate) fn transfer_active(
         &self,
-        download_handle: &Option<JoinHandle<anyhow::Result<Vec<String>>>>,
+        download_handle: &Option<JoinHandle<anyhow::Result<Vec<AlbumDownloadReport>>>>,
     ) -> bool {
         download_handle.is_some() && !self.transfer_done
     }
@@ -86,7 +89,7 @@ impl TuiState {
 
     pub(crate) fn confirm_or_quit(
         &mut self,
-        download_handle: &Option<JoinHandle<anyhow::Result<Vec<String>>>>,
+        download_handle: &Option<JoinHandle<anyhow::Result<Vec<AlbumDownloadReport>>>>,
     ) -> bool {
         if self.transfer_active(download_handle) {
             self.confirm_quit = true;
@@ -109,6 +112,7 @@ impl TuiState {
         if let Some(&first_album) = self.download_queue.first() {
             self.download_current = 0;
             self.downloaded_names.clear();
+            self.download_reports.clear();
             self.transfer_done = false;
             self.confirm_quit = false;
             self.active_album_idx = first_album;
