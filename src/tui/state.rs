@@ -115,6 +115,11 @@ impl TuiState {
         }
     }
 
+    pub(crate) fn clear_selection_queue(&mut self) {
+        self.selected_albums.fill(false);
+        self.album_track_selections.fill(None);
+    }
+
     pub(crate) fn start_queue(&mut self) {
         self.download_queue.clear();
         self.download_track_ids.clear();
@@ -162,8 +167,7 @@ impl TuiState {
 
     pub(crate) fn clear_selection_after_done(&mut self) {
         if self.transfer_done {
-            self.selected_albums.fill(false);
-            self.album_track_selections.fill(None);
+            self.clear_selection_queue();
         }
     }
 

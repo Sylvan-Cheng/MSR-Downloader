@@ -166,6 +166,30 @@ fn start_tui_download_from_queue(
     }))
 }
 
+fn handle_download_control_button(
+    state: &mut TuiState,
+    download_handle: &Option<JoinHandle<anyhow::Result<Vec<AlbumDownloadReport>>>>,
+    button: DownloadControlButton,
+) -> bool {
+    match button {
+        DownloadControlButton::Albums => {
+            state.clear_selection_after_done();
+            state.screen = AppScreen::Select;
+            false
+        }
+        DownloadControlButton::Help => {
+            state.open_help();
+            false
+        }
+        DownloadControlButton::Quit => state.confirm_or_quit(download_handle),
+        DownloadControlButton::Abort => true,
+        DownloadControlButton::Cancel => {
+            state.confirm_quit = false;
+            false
+        }
+    }
+}
+
 async fn expand_tui_album(
     api: &ApiClient,
     albums: &[models::AlbumBrief],
@@ -425,7 +449,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                 state.set_all_visible_albums(&visible_indices, !all_selected);
                             }
                             code if is_key(code, 'c') && download_handle.is_none() => {
-                                state.selected_albums.fill(false);
+                                state.clear_selection_queue();
                             }
                             KeyCode::Enter if state.search_active => {
                                 state.search_active = false;
@@ -480,28 +504,6 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                     {
                                         state.close_help();
                                     } else if state.help_overlay == HelpOverlay::Visible {
-                                    } else if let Some(button) = download_control_button_at(
-                                        chunks[3],
-                                        mouse.column,
-                                        mouse.row,
-                                        state.confirm_quit,
-                                    ) {
-                                        match button {
-                                            DownloadControlButton::Albums => {
-                                                state.clear_selection_after_done();
-                                                state.screen = AppScreen::Select;
-                                            }
-                                            DownloadControlButton::Help => state.open_help(),
-                                            DownloadControlButton::Quit => {
-                                                if state.confirm_or_quit(&download_handle) {
-                                                    break;
-                                                }
-                                            }
-                                            DownloadControlButton::Abort => break,
-                                            DownloadControlButton::Cancel => {
-                                                state.confirm_quit = false;
-                                            }
-                                        }
                                     } else if let Some(next_screen) =
                                         screen_from_header_click(chunks[0], mouse.column, mouse.row)
                                     {
@@ -554,8 +556,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                             SelectControlButton::Clear
                                                 if download_handle.is_none() =>
                                             {
-                                                state.selected_albums.fill(false);
-                                                state.album_track_selections.fill(None);
+                                                state.clear_selection_queue();
                                                 state.clear_search();
                                             }
                                             SelectControlButton::Expand
@@ -773,6 +774,19 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                     {
                                         state.close_help();
                                     } else if state.help_overlay == HelpOverlay::Visible {
+                                    } else if let Some(button) = download_control_button_at(
+                                        chunks[3],
+                                        mouse.column,
+                                        mouse.row,
+                                        state.confirm_quit,
+                                    ) {
+                                        if handle_download_control_button(
+                                            &mut state,
+                                            &download_handle,
+                                            button,
+                                        ) {
+                                            break;
+                                        }
                                     } else if let Some(next_screen) =
                                         screen_from_header_click(chunks[0], mouse.column, mouse.row)
                                     {
@@ -1093,27 +1107,26 @@ mod tests {
     }
 
     #[test]
-    fn tui_state_clear_search_resets_search_state() {
+    fn tui_state_clears_search_help_and_selection_state() {
         let mut state = TuiState::new(3);
         state.search_active = true;
         state.search_query = "test".to_string();
+        state.selected_albums = vec![true, false, true];
+        state.album_track_selections = vec![None, Some(vec![true, false]), Some(vec![false, true])];
+
+        assert_eq!(state.help_overlay, HelpOverlay::Hidden);
+        state.open_help();
+        assert_eq!(state.help_overlay, HelpOverlay::Visible);
+        state.close_help();
+        assert_eq!(state.help_overlay, HelpOverlay::Hidden);
 
         state.clear_search();
+        state.clear_selection_queue();
 
         assert!(!state.search_active);
         assert!(state.search_query.is_empty());
-    }
-
-    #[test]
-    fn tui_state_help_overlay_toggles() {
-        let mut state = TuiState::new(3);
-        assert_eq!(state.help_overlay, HelpOverlay::Hidden);
-
-        state.open_help();
-        assert_eq!(state.help_overlay, HelpOverlay::Visible);
-
-        state.close_help();
-        assert_eq!(state.help_overlay, HelpOverlay::Hidden);
+        assert_eq!(state.selected_albums, vec![false, false, false]);
+        assert_eq!(state.album_track_selections, vec![None, None, None]);
     }
 
     #[test]
@@ -1222,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn tui_state_clear_selection_after_done_clears_when_done() {
+    fn tui_state_clear_selection_after_done_only_when_done() {
         let mut state = TuiState::new(3);
         state.selected_albums = vec![true, true, false];
         state.transfer_done = true;
@@ -1231,11 +1244,7 @@ mod tests {
 
         assert_eq!(state.selected_albums, vec![false, false, false]);
         assert_eq!(state.album_track_selections, vec![None, None, None]);
-    }
 
-    #[test]
-    fn tui_state_clear_selection_after_done_noop_when_not_done() {
-        let mut state = TuiState::new(3);
         state.selected_albums = vec![true, true, false];
         state.transfer_done = false;
 
@@ -1253,6 +1262,25 @@ mod tests {
         assert!(!state.confirm_quit);
     }
 
+    #[tokio::test]
+    async fn download_control_quit_confirms_active_transfer_before_exit() {
+        let mut state = TuiState::new(1);
+        state.screen = AppScreen::Select;
+        let handle: Option<JoinHandle<anyhow::Result<Vec<AlbumDownloadReport>>>> =
+            Some(tokio::spawn(async { Ok(Vec::new()) }));
+
+        let should_exit =
+            handle_download_control_button(&mut state, &handle, DownloadControlButton::Quit);
+
+        assert!(!should_exit);
+        assert!(state.confirm_quit);
+        assert_eq!(state.screen, AppScreen::Downloading);
+
+        if let Some(handle) = handle {
+            handle.abort();
+        }
+    }
+
     #[test]
     fn cli_requires_explicit_action_in_cli_mode() {
         let cli = cli::Cli::try_parse_from(["msr-downloader", "--cli"]).unwrap();
@@ -1263,15 +1291,25 @@ mod tests {
     }
 
     #[test]
-    fn cli_all_flag_parses() {
+    fn cli_action_flags_parse_and_validate() {
         let cli = cli::Cli::try_parse_from(["msr-downloader", "--cli", "--all"]).unwrap();
 
+        assert!(cli.all);
         assert!(cli::validate_cli_action(&cli).is_ok());
-    }
 
-    #[test]
-    fn cli_album_and_album_id_conflict() {
-        let cli = cli::Cli::try_parse_from([
+        let dry_run =
+            cli::Cli::try_parse_from(["msr-downloader", "--cli", "--album", "test", "--dry-run"])
+                .unwrap();
+        assert!(dry_run.dry_run);
+        assert!(cli::validate_cli_action(&dry_run).is_ok());
+
+        let all_dry_run =
+            cli::Cli::try_parse_from(["msr-downloader", "--cli", "--all", "--dry-run"]).unwrap();
+        assert!(all_dry_run.all);
+        assert!(all_dry_run.dry_run);
+        assert!(cli::validate_cli_action(&all_dry_run).is_ok());
+
+        let conflict = cli::Cli::try_parse_from([
             "msr-downloader",
             "--cli",
             "--album",
@@ -1280,7 +1318,7 @@ mod tests {
             "123",
         ])
         .unwrap();
-        let error = cli::validate_cli_action(&cli).unwrap_err().to_string();
+        let error = cli::validate_cli_action(&conflict).unwrap_err().to_string();
 
         assert!(error.contains("use either --album or --album-id"));
     }
@@ -1315,26 +1353,6 @@ mod tests {
 
         assert!(error.contains("--tracks"));
         assert!(error.contains("--all"));
-    }
-
-    #[test]
-    fn cli_dry_run_flag_parses() {
-        let cli =
-            cli::Cli::try_parse_from(["msr-downloader", "--cli", "--album", "test", "--dry-run"])
-                .unwrap();
-
-        assert!(cli.dry_run);
-        assert!(cli::validate_cli_action(&cli).is_ok());
-    }
-
-    #[test]
-    fn cli_all_dry_run_flag_parses() {
-        let cli =
-            cli::Cli::try_parse_from(["msr-downloader", "--cli", "--all", "--dry-run"]).unwrap();
-
-        assert!(cli.all);
-        assert!(cli.dry_run);
-        assert!(cli::validate_cli_action(&cli).is_ok());
     }
 
     #[test]
