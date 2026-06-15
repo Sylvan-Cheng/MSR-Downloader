@@ -30,14 +30,17 @@ msr-downloader
 
 | 操作 | 功能 |
 |---|---|
-| `↑` / `↓` | 移动专辑焦点 |
-| 鼠标点击 / `Space` | 选择或取消选择专辑 |
+| `↑` / `↓` | 移动焦点 |
+| 鼠标点击 / `Space` | 选择或取消选择专辑/曲目 |
 | `A` | 选择或取消选择当前过滤结果 |
+| `C` | 清空选择队列 |
+| `Enter` | 展开/折叠专辑，查看并选择单首曲目 |
+| `d` | 开始下载选中的专辑 |
 | `/` | 搜索专辑 |
-| `Esc` | 清空搜索 |
-| `Enter` | 开始下载队列 |
+| `Esc` | 清空搜索 / 关闭帮助浮层 |
+| `?` | 打开帮助浮层 |
 | `Tab` | 切换专辑页和下载页 |
-| `Q` | 退出 |
+| `Q` | 退出（传输中需确认） |
 
 ## 命令行下载
 
@@ -71,6 +74,12 @@ msr-downloader --cli --album "春弦" --dry-run
 msr-downloader --cli --all
 ```
 
+选择专辑中的部分曲目：
+
+```bash
+msr-downloader --cli --album "春弦" --tracks 1,3,5-8
+```
+
 指定输出目录：
 
 ```bash
@@ -85,6 +94,7 @@ msr-downloader --cli --album "春弦" --output ./music
 | `--album-id <cid>` | 按专辑 CID 下载 |
 | `--exact` | 专辑名精确匹配 |
 | `--all` | 下载全部专辑 |
+| `--tracks <list>` | 选择曲目，如 `1,3,5-8`（仅限 `--album`/`--album-id`） |
 | `--dry-run` | 只预览，不下载或删除文件 |
 | `--output <dir>` | 临时指定输出目录 |
 | `--concurrency <n>` | 临时指定并发数 |
