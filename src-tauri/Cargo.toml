@@ -1,13 +1,15 @@
 [package]
 name = "msr-downloader-gui"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+base64 = "0.22"
 msr-downloader = { path = ".." }
+reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["rt-multi-thread"] }

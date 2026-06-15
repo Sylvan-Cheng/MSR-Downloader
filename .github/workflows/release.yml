@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag to upload assets to
         required: true
-        default: v0.2.1
+        default: v0.5.0
 
 permissions:
   contents: write
@@ -30,8 +30,8 @@ jobs:
             gh release create "$TAG_NAME" --title "$TAG_NAME" --generate-notes
           fi
 
-  build:
-    name: Build ${{ matrix.name }}
+  build-cli:
+    name: Build CLI ${{ matrix.name }}
     needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
@@ -88,6 +88,78 @@ jobs:
       - name: Prepare asset
         shell: pwsh
         run: Copy-Item -LiteralPath "target/release/${{ matrix.binary }}" -Destination "${{ matrix.asset }}"
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag }}
+        run: gh release upload "$env:TAG_NAME" "${{ matrix.asset }}" --clobber
+        shell: pwsh
+
+  build-gui:
+    name: Build GUI ${{ matrix.name }}
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            binary: src-tauri/target/release/msr-downloader-gui
+            asset: msr-downloader-gui-linux-x86_64
+          - name: windows-x86_64
+            os: windows-latest
+            binary: src-tauri/target/release/msr-downloader-gui.exe
+            asset: msr-downloader-gui-windows-x86_64.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.6.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            src-tauri/target
+          key: ${{ runner.os }}-gui-release-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-gui-release-cargo-
+
+      - name: Build GUI
+        run: pnpm tauri build --no-bundle
+
+      - name: Prepare asset
+        shell: pwsh
+        run: Copy-Item -LiteralPath "${{ matrix.binary }}" -Destination "${{ matrix.asset }}"
 
       - name: Upload release asset
         env:

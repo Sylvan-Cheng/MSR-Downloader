@@ -19,6 +19,22 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 1420,
     strictPort: true,
+    proxy: {
+      '/msr-api': {
+        target: 'https://monster-siren.hypergryph.com/api',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/msr-api/, ''),
+      },
+      '/msr-img': {
+        target: 'https://web.hycdn.cn',
+        changeOrigin: true,
+        headers: {
+          Referer: 'https://monster-siren.hypergryph.com/',
+          'User-Agent': 'Mozilla/5.0 MSR-Downloader-GUI',
+        },
+        rewrite: (path) => path.replace(/^\/msr-img/, ''),
+      },
+    },
     watch: {
       ignored: ['**/src-tauri/**'],
     },

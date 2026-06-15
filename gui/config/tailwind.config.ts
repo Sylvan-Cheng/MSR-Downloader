@@ -5,12 +5,12 @@ export default {
   theme: {
     extend: {
       colors: {
-        graphite: '#101416',
-        panel: '#161b1d',
-        amberline: '#d6a85e',
+        graphite: '#09090b',
+        panel: '#111317',
+        amberline: '#d4d8dd',
       },
       fontFamily: {
-        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        sans: ['Microsoft YaHei', 'Segoe UI', 'Helvetica Neue', 'Arial', 'ui-sans-serif', 'system-ui', 'sans-serif'],
       },
     },
   },

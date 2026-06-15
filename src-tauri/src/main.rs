@@ -1,11 +1,13 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+use base64::Engine;
 use msr_downloader::api::ApiClient;
 use msr_downloader::config::Config;
 use msr_downloader::download_session::{self, AlbumDownloadRequest};
 use msr_downloader::downloader::DownloadCancellation;
 use msr_downloader::models::{AlbumBrief, AlbumDetail};
 use msr_downloader::progress::{DownloadEvent, EventSink};
+use reqwest::header::{CONTENT_TYPE, REFERER, USER_AGENT};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
@@ -134,6 +136,42 @@ fn cancel_download(state: tauri::State<'_, AppState>) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+async fn fetch_cover_data_url(url: String) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(&url).map_err(|e| e.to_string())?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some("web.hycdn.cn") {
+        return Err("unsupported cover image host".to_string());
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(parsed)
+        .header(REFERER, "https://monster-siren.hypergryph.com/")
+        .header(USER_AGENT, "Mozilla/5.0 MSR-Downloader-GUI")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("cover image request failed with {status}"));
+    }
+
+    let mime_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.starts_with("image/"))
+        .unwrap_or("image/jpeg")
+        .to_string();
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("cover image is too large".to_string());
+    }
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime_type};base64,{encoded}"))
+}
+
 fn main() {
     let state = AppState::load().expect("failed to initialize GUI state");
     tauri::Builder::default()
@@ -142,7 +180,8 @@ fn main() {
             list_albums,
             get_album_detail,
             download_album,
-            cancel_download
+            cancel_download,
+            fetch_cover_data_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
