@@ -7,6 +7,8 @@ use crate::progress::{
     AlbumDownloadReport, DownloadEvent, DownloadIssue, DownloadIssueKind, DownloadProgress,
     EventSink, MaybeEventSink, SongStatus,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -20,6 +22,113 @@ use std::time::Instant;
 struct DownloadContext {
     progress: Option<Arc<Mutex<DownloadProgress>>>,
     sink: MaybeEventSink,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumDownloadOptions {
+    pub track_selection: TrackSelection,
+}
+
+impl AlbumDownloadOptions {
+    pub fn all_tracks() -> Self {
+        Self::default()
+    }
+
+    pub fn track_indices(indices: Vec<usize>) -> Self {
+        Self {
+            track_selection: TrackSelection::Indices(indices),
+        }
+    }
+
+    pub fn song_ids(song_ids: Vec<String>) -> Self {
+        Self {
+            track_selection: TrackSelection::SongIds(song_ids),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum TrackSelection {
+    #[default]
+    All,
+    /// 1-based track indices as shown to users.
+    Indices(Vec<usize>),
+    SongIds(Vec<String>),
+}
+
+impl TrackSelection {
+    fn selected_album_songs<'a>(
+        &self,
+        album: &'a AlbumDetail,
+    ) -> anyhow::Result<Vec<(usize, &'a crate::models::SongBrief)>> {
+        match self {
+            Self::All => Ok(album.songs.iter().enumerate().collect()),
+            Self::Indices(indices) => select_album_songs_by_indices(album, indices),
+            Self::SongIds(song_ids) => select_album_songs_by_ids(album, song_ids),
+        }
+    }
+}
+
+fn select_album_songs_by_indices<'a>(
+    album: &'a AlbumDetail,
+    indices: &[usize],
+) -> anyhow::Result<Vec<(usize, &'a crate::models::SongBrief)>> {
+    if indices.is_empty() {
+        anyhow::bail!("track selection cannot be empty");
+    }
+
+    let mut seen = HashSet::new();
+    let mut wanted = HashSet::new();
+    for &index in indices {
+        if index == 0 || index > album.songs.len() {
+            anyhow::bail!(
+                "track index {index} is out of range for album {} with {} track(s)",
+                album.name,
+                album.songs.len()
+            );
+        }
+        if seen.insert(index) {
+            wanted.insert(index - 1);
+        }
+    }
+
+    Ok(album
+        .songs
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| wanted.contains(idx))
+        .collect())
+}
+
+fn select_album_songs_by_ids<'a>(
+    album: &'a AlbumDetail,
+    song_ids: &[String],
+) -> anyhow::Result<Vec<(usize, &'a crate::models::SongBrief)>> {
+    if song_ids.is_empty() {
+        anyhow::bail!("track selection cannot be empty");
+    }
+
+    let wanted: HashSet<&str> = song_ids.iter().map(String::as_str).collect();
+    let selected: Vec<_> = album
+        .songs
+        .iter()
+        .enumerate()
+        .filter(|(_, song)| wanted.contains(song.cid.as_str()))
+        .collect();
+
+    if selected.len() != wanted.len() {
+        let album_ids: HashSet<&str> = album.songs.iter().map(|song| song.cid.as_str()).collect();
+        let missing = song_ids
+            .iter()
+            .find(|song_id| !album_ids.contains(song_id.as_str()))
+            .map(String::as_str)
+            .unwrap_or("<unknown>");
+        anyhow::bail!("song id {missing} is not part of album {}", album.name);
+    }
+
+    Ok(selected)
 }
 
 impl DownloadContext {
@@ -65,14 +174,31 @@ pub async fn download_album_with_progress<A: MusicSource>(
     config: &Config,
     progress: Option<Arc<Mutex<DownloadProgress>>>,
 ) -> anyhow::Result<AlbumDownloadReport> {
+    download_album_with_options_progress(
+        api,
+        album,
+        config,
+        AlbumDownloadOptions::all_tracks(),
+        progress,
+    )
+    .await
+}
+
+pub async fn download_album_with_options_progress<A: MusicSource>(
+    api: &A,
+    album: &AlbumDetail,
+    config: &Config,
+    options: AlbumDownloadOptions,
+    progress: Option<Arc<Mutex<DownloadProgress>>>,
+) -> anyhow::Result<AlbumDownloadReport> {
     let progress = progress.unwrap_or_else(|| {
         Arc::new(Mutex::new(DownloadProgress::new(
             &album.name,
-            album.songs.len(),
+            selected_track_count(album, &options),
         )))
     });
     let ctx = DownloadContext::with_progress(Some(progress));
-    download_album_inner(api, album, config, &ctx).await
+    download_album_inner(api, album, config, &options, &ctx).await
 }
 
 pub async fn download_album_with_events<A: MusicSource>(
@@ -81,22 +207,35 @@ pub async fn download_album_with_events<A: MusicSource>(
     config: &Config,
     sink: impl EventSink + 'static,
 ) -> anyhow::Result<AlbumDownloadReport> {
+    download_album_with_options_events(api, album, config, AlbumDownloadOptions::all_tracks(), sink)
+        .await
+}
+
+pub async fn download_album_with_options_events<A: MusicSource>(
+    api: &A,
+    album: &AlbumDetail,
+    config: &Config,
+    options: AlbumDownloadOptions,
+    sink: impl EventSink + 'static,
+) -> anyhow::Result<AlbumDownloadReport> {
     let ctx = DownloadContext::new(None, MaybeEventSink::new(Some(Arc::new(sink))));
-    download_album_inner(api, album, config, &ctx).await
+    download_album_inner(api, album, config, &options, &ctx).await
 }
 
 async fn download_album_inner<A: MusicSource>(
     api: &A,
     album: &AlbumDetail,
     config: &Config,
+    options: &AlbumDownloadOptions,
     ctx: &DownloadContext,
 ) -> anyhow::Result<AlbumDownloadReport> {
+    let selected_count = selected_track_count(album, options);
     ctx.sink.emit(DownloadEvent::AlbumStarted {
         album_name: album.name.clone(),
-        total_tracks: album.songs.len(),
+        total_tracks: selected_count,
     });
 
-    match download_album_body(api, album, config, ctx).await {
+    match download_album_body(api, album, config, options, ctx).await {
         Ok(report) => {
             ctx.sink.emit(DownloadEvent::AlbumFinished {
                 report: report.clone(),
@@ -116,12 +255,15 @@ async fn download_album_body<A: MusicSource>(
     api: &A,
     album: &AlbumDetail,
     config: &Config,
+    options: &AlbumDownloadOptions,
     ctx: &DownloadContext,
 ) -> anyhow::Result<AlbumDownloadReport> {
+    let selected_album_songs = options.track_selection.selected_album_songs(album)?;
+    let selected_count = selected_album_songs.len();
     let progress = ctx.progress.clone().unwrap_or_else(|| {
         Arc::new(Mutex::new(DownloadProgress::new(
             &album.name,
-            album.songs.len(),
+            selected_count,
         )))
     });
     let ctx = DownloadContext::new(Some(progress), ctx.sink.clone());
@@ -140,10 +282,10 @@ async fn download_album_body<A: MusicSource>(
 
     let concurrency = config.download.concurrency.max(1);
     let semaphore = Arc::new(Semaphore::new(concurrency));
-    let total = album.songs.len();
+    let total = selected_count;
 
     let mut song_details = Vec::with_capacity(total);
-    for (idx, song_brief) in album.songs.iter().enumerate() {
+    for (idx, song_brief) in selected_album_songs {
         let song_detail = api.get_song(&song_brief.cid).await?;
         set_progress_status(
             &ctx.progress,
@@ -215,6 +357,14 @@ async fn download_album_body<A: MusicSource>(
     }
 
     Ok(report_from_progress(&ctx.progress, album))
+}
+
+fn selected_track_count(album: &AlbumDetail, options: &AlbumDownloadOptions) -> usize {
+    match &options.track_selection {
+        TrackSelection::All => album.songs.len(),
+        TrackSelection::Indices(indices) => indices.iter().copied().collect::<HashSet<_>>().len(),
+        TrackSelection::SongIds(song_ids) => song_ids.iter().collect::<HashSet<_>>().len(),
+    }
 }
 
 fn report_from_progress(
@@ -862,6 +1012,75 @@ mod tests {
             b"ok"
         );
         assert!(!root.join("Album").join("Bad.wav").exists());
+    }
+
+    #[tokio::test]
+    async fn download_album_with_track_indices_downloads_only_selected_tracks() {
+        let root = test_dir("selected-tracks");
+        let mut source = MockSource::default();
+        source.album_details.insert(
+            "album".to_string(),
+            album_with_songs("album", "Album", &["one", "two", "three"]),
+        );
+        source.song_details.insert(
+            "one".to_string(),
+            song_detail_with_url("one", "One", "mock://one.wav", None),
+        );
+        source.song_details.insert(
+            "two".to_string(),
+            song_detail_with_url("two", "Two", "mock://two.wav", None),
+        );
+        source.song_details.insert(
+            "three".to_string(),
+            song_detail_with_url("three", "Three", "mock://three.wav", None),
+        );
+        source
+            .files
+            .insert("mock://one.wav".to_string(), b"one".to_vec());
+        source
+            .files
+            .insert("mock://three.wav".to_string(), b"three".to_vec());
+        let config = test_config(root.clone());
+
+        let report = download_album_with_options_progress(
+            &source,
+            source.album_details.get("album").unwrap(),
+            &config,
+            AlbumDownloadOptions::track_indices(vec![1, 3]),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.total_tracks, 2);
+        assert_eq!(report.ok_count(), 2);
+        assert_eq!(
+            *source.audio_calls.lock().unwrap(),
+            vec!["mock://one.wav".to_string(), "mock://three.wav".to_string()]
+        );
+        assert!(root.join("Album").join("One.wav").exists());
+        assert!(!root.join("Album").join("Two.wav").exists());
+        assert!(root.join("Album").join("Three.wav").exists());
+    }
+
+    #[tokio::test]
+    async fn download_album_rejects_out_of_range_track_selection() {
+        let root = test_dir("selected-tracks-out-of-range");
+        let source = source_for_single_song("mock://song.wav", b"audio", None);
+        let config = test_config(root);
+
+        let error = download_album_with_options_progress(
+            &source,
+            source.album_details.get("album").unwrap(),
+            &config,
+            AlbumDownloadOptions::track_indices(vec![2]),
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("out of range"));
     }
 
     #[tokio::test]
