@@ -64,7 +64,7 @@ pub(crate) fn album_mouse_action(
     }
 
     let checkbox_offset = if track_rows.get(index).copied().unwrap_or(false) {
-        4
+        3
     } else {
         2
     };

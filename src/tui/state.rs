@@ -23,7 +23,8 @@ pub(crate) enum AlbumMouseAction {
 
 pub(crate) struct DownloadScreen<'a> {
     pub(crate) albums: &'a [models::AlbumBrief],
-    pub(crate) selected_albums: &'a [bool],
+    pub(crate) download_queue: &'a [usize],
+    pub(crate) download_track_ids: &'a [Option<Vec<String>>],
     pub(crate) current_album_idx: usize,
     pub(crate) current: usize,
     pub(crate) total: usize,

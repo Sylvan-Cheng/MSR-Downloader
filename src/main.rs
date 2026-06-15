@@ -714,7 +714,8 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                             f,
                             DownloadScreen {
                                 albums: &albums,
-                                selected_albums: &state.selected_albums,
+                                download_queue: &state.download_queue,
+                                download_track_ids: &state.download_track_ids,
                                 current_album_idx: state.active_album_idx,
                                 current: state.download_current + 1,
                                 total: state.download_queue.len(),
@@ -1012,7 +1013,7 @@ mod tests {
         );
         let track_rows = [false, true, false];
         assert_eq!(
-            album_mouse_action(0, 3, list_area, 6, 5, &track_rows),
+            album_mouse_action(0, 3, list_area, 5, 5, &track_rows),
             Some(AlbumMouseAction::Toggle(1))
         );
         assert_eq!(

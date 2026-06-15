@@ -70,7 +70,8 @@ pub(crate) fn download_control_button_at(
 pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
     let DownloadScreen {
         albums,
-        selected_albums,
+        download_queue,
+        download_track_ids,
         current_album_idx,
         current,
         total,
@@ -132,48 +133,49 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
         .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
         .split(chunks[1]);
 
-    let album_items: Vec<ListItem> = albums
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| !is_idle && (selected_albums[*idx] || *idx == current_album_idx))
-        .map(|(i, a)| {
-            let incomplete = done && has_done_issues(progress, reports);
-            let queue_pos = current.saturating_sub(1);
-            let album_pos = selected_albums[..i]
-                .iter()
-                .filter(|&&selected| selected)
-                .count();
-            let is_completed = !incomplete && (done || album_pos < queue_pos);
-            let (marker, style) = if incomplete {
-                (
-                    "...",
-                    Style::default().fg(COLOR_MUTED).add_modifier(Modifier::DIM),
-                )
-            } else if is_completed {
-                (
-                    "OK ",
-                    Style::default().fg(COLOR_MUTED).add_modifier(Modifier::DIM),
-                )
-            } else if i == current_album_idx {
-                (
-                    "GET",
-                    Style::default()
-                        .fg(COLOR_SECONDARY)
-                        .bg(Color::Rgb(16, 20, 22))
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if selected_albums[i] {
-                ("...", Style::default().fg(COLOR_SUCCESS))
-            } else {
-                ("   ", Style::default().fg(COLOR_MUTED))
-            };
+    let album_items: Vec<ListItem> = album_queue_rows(
+        albums,
+        download_queue,
+        download_track_ids,
+        AlbumQueueState {
+            current_album_idx,
+            current,
+            done,
+            incomplete: done && has_done_issues(progress, reports),
+            is_idle,
+        },
+    )
+    .into_iter()
+    .map(|row| {
+        let style = match row.state {
+            AlbumQueueRowState::Incomplete => {
+                Style::default().fg(COLOR_MUTED).add_modifier(Modifier::DIM)
+            }
+            AlbumQueueRowState::Completed => {
+                Style::default().fg(COLOR_MUTED).add_modifier(Modifier::DIM)
+            }
+            AlbumQueueRowState::Current => Style::default()
+                .fg(COLOR_SECONDARY)
+                .bg(Color::Rgb(16, 20, 22))
+                .add_modifier(Modifier::BOLD),
+            AlbumQueueRowState::Pending => Style::default().fg(COLOR_SUCCESS),
+            AlbumQueueRowState::Muted => Style::default().fg(COLOR_MUTED),
+        };
 
-            ListItem::new(Line::from(vec![Span::styled(
-                format!("{} {}", marker, a.name),
-                style,
-            )]))
-        })
-        .collect();
+        let mut spans = vec![Span::styled(format!("{} {}", row.marker, row.name), style)];
+        if let Some(track_count) = row.partial_track_count {
+            spans.push(Span::styled(
+                format!(
+                    "  {} track{}",
+                    track_count,
+                    if track_count == 1 { "" } else { "s" }
+                ),
+                Style::default().fg(COLOR_MUTED),
+            ));
+        }
+        ListItem::new(Line::from(spans))
+    })
+    .collect();
 
     let album_list = List::new(album_items).block(create_block("ALBUM QUEUE", COLOR_MUTED));
     f.render_widget(album_list, body[0]);
@@ -423,6 +425,74 @@ fn done_issue_summaries(
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AlbumQueueRowState {
+    Incomplete,
+    Completed,
+    Current,
+    Pending,
+    Muted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AlbumQueueRow<'a> {
+    marker: &'static str,
+    name: &'a str,
+    partial_track_count: Option<usize>,
+    state: AlbumQueueRowState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AlbumQueueState {
+    current_album_idx: usize,
+    current: usize,
+    done: bool,
+    incomplete: bool,
+    is_idle: bool,
+}
+
+fn album_queue_rows<'a>(
+    albums: &'a [models::AlbumBrief],
+    download_queue: &[usize],
+    download_track_ids: &[Option<Vec<String>>],
+    state: AlbumQueueState,
+) -> Vec<AlbumQueueRow<'a>> {
+    if state.is_idle {
+        return Vec::new();
+    }
+
+    let queue_pos = state.current.saturating_sub(1);
+    download_queue
+        .iter()
+        .enumerate()
+        .filter_map(|(queue_idx, album_idx)| {
+            let album = albums.get(*album_idx)?;
+            let is_completed = !state.incomplete && (state.done || queue_idx < queue_pos);
+            let (marker, row_state) = if state.incomplete {
+                ("...", AlbumQueueRowState::Incomplete)
+            } else if is_completed {
+                ("OK ", AlbumQueueRowState::Completed)
+            } else if *album_idx == state.current_album_idx && queue_idx == queue_pos {
+                ("GET", AlbumQueueRowState::Current)
+            } else if queue_idx > queue_pos {
+                ("...", AlbumQueueRowState::Pending)
+            } else {
+                ("   ", AlbumQueueRowState::Muted)
+            };
+
+            Some(AlbumQueueRow {
+                marker,
+                name: album.name.as_str(),
+                partial_track_count: download_track_ids
+                    .get(queue_idx)
+                    .and_then(Option::as_ref)
+                    .map(Vec::len),
+                state: row_state,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) fn download_controls_text(confirm_quit: bool) -> String {
     crate::tui::chrome::controls_text(download_control_items(confirm_quit))
@@ -471,7 +541,17 @@ pub(crate) fn current_transfer_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use msr_downloader::models::AlbumBrief;
     use msr_downloader::progress::SongStatus;
+
+    fn album(name: &str) -> AlbumBrief {
+        AlbumBrief {
+            cid: name.to_string(),
+            name: name.to_string(),
+            cover_url: String::new(),
+            artists: Vec::new(),
+        }
+    }
 
     #[test]
     fn download_status_stays_status_only() {
@@ -524,6 +604,31 @@ mod tests {
     fn download_controls_follow_confirmation_mode() {
         assert_eq!(download_controls_text(false), "[Albums] [Help] [Quit] ");
         assert_eq!(download_controls_text(true), "[Abort] [Cancel] ");
+    }
+
+    #[test]
+    fn album_queue_rows_use_download_queue_and_partial_counts() {
+        let albums = vec![album("Full"), album("Partial"), album("Other")];
+        let rows = album_queue_rows(
+            &albums,
+            &[1, 0],
+            &[Some(vec!["song".to_string()]), None],
+            AlbumQueueState {
+                current_album_idx: 1,
+                current: 1,
+                done: false,
+                incomplete: false,
+                is_idle: false,
+            },
+        );
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].marker, "GET");
+        assert_eq!(rows[0].name, "Partial");
+        assert_eq!(rows[0].partial_track_count, Some(1));
+        assert_eq!(rows[1].marker, "...");
+        assert_eq!(rows[1].name, "Full");
+        assert_eq!(rows[1].partial_track_count, None);
     }
 
     #[test]

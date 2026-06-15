@@ -221,10 +221,10 @@ pub(crate) fn draw_select_screen(f: &mut ratatui::Frame, screen: SelectScreen<'_
         .map(|row| match *row {
             SelectRow::Album { album_idx } => {
                 let a = &albums[album_idx];
-                let disclosure = if Some(album_idx) == expanded_album_idx {
-                    "v"
-                } else {
+                let focus = if selected_track.is_none() && album_idx == selected {
                     ">"
+                } else {
+                    " "
                 };
                 let checkbox = album_checkbox(album_idx, selected_albums, album_track_selections);
                 let style = if selected_track.is_none() && album_idx == selected {
@@ -238,7 +238,7 @@ pub(crate) fn draw_select_screen(f: &mut ratatui::Frame, screen: SelectScreen<'_
                     Style::default().fg(COLOR_MUTED)
                 };
                 ListItem::new(Line::from(vec![Span::styled(
-                    format!("{} {} {}", disclosure, checkbox, a.name),
+                    format!("{} {} {}", focus, checkbox, a.name),
                     style,
                 )]))
             }
@@ -268,8 +268,26 @@ pub(crate) fn draw_select_screen(f: &mut ratatui::Frame, screen: SelectScreen<'_
                 } else {
                     Style::default().fg(COLOR_MUTED)
                 };
+                let focus = if selected_track == Some(track_idx) && album_idx == selected {
+                    ">"
+                } else {
+                    " "
+                };
+                let branch =
+                    if expanded_album.is_some_and(|album| track_idx + 1 == album.songs.len()) {
+                        "└"
+                    } else {
+                        "│"
+                    };
                 ListItem::new(Line::from(vec![Span::styled(
-                    format!("    {} {:02}  {}", checkbox, track_idx + 1, song),
+                    format!(
+                        "{} {}{} {:02}  {}",
+                        focus,
+                        branch,
+                        checkbox,
+                        track_idx + 1,
+                        song
+                    ),
                     style,
                 )]))
             }
@@ -382,16 +400,10 @@ fn queue_items<'a>(
     let mut items = Vec::new();
     for (album_idx, album) in albums.iter().enumerate() {
         if selected_albums[album_idx] {
-            items.push(ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled("[x] ", Style::default().fg(COLOR_SUCCESS)),
-                    Span::styled(album.name.clone(), Style::default().fg(COLOR_SECONDARY)),
-                ]),
-                Line::from(Span::styled(
-                    "    full album",
-                    Style::default().fg(COLOR_MUTED),
-                )),
-            ]));
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled("[x] ", Style::default().fg(COLOR_SUCCESS)),
+                Span::styled(album.name.clone(), Style::default().fg(COLOR_SECONDARY)),
+            ])));
             continue;
         }
 
