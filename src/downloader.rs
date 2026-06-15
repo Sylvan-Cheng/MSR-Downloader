@@ -5,11 +5,12 @@ use crate::metadata;
 use crate::models::{AlbumDetail, SongDetail};
 use crate::progress::{
     AlbumDownloadReport, DownloadEvent, DownloadIssue, DownloadIssueKind, DownloadProgress,
-    EventSink, MaybeEventSink, SongStatus,
+    EventSink, MaybeEventSink, ProgressSnapshotAdapter, SongStatus,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -20,8 +21,28 @@ use std::time::Instant;
 /// not need to accept them as separate parameters.
 #[derive(Clone)]
 struct DownloadContext {
-    progress: Option<Arc<Mutex<DownloadProgress>>>,
+    progress: ProgressSnapshotAdapter,
     sink: MaybeEventSink,
+    cancellation: DownloadCancellation,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DownloadCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl DownloadCancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +67,14 @@ impl AlbumDownloadOptions {
             track_selection: TrackSelection::SongIds(song_ids),
         }
     }
+
+    pub fn selected_track_count(&self, album: &AlbumDetail) -> usize {
+        self.track_selection.selected_count(album)
+    }
+
+    pub fn selects_all_tracks(&self) -> bool {
+        self.track_selection.is_all()
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +88,48 @@ pub enum TrackSelection {
 }
 
 impl TrackSelection {
+    pub fn is_all(&self) -> bool {
+        matches!(self, Self::All)
+    }
+
+    pub fn selected_count(&self, album: &AlbumDetail) -> usize {
+        match self {
+            Self::All => album.songs.len(),
+            Self::Indices(indices) => indices.iter().copied().collect::<HashSet<_>>().len(),
+            Self::SongIds(song_ids) => song_ids.iter().collect::<HashSet<_>>().len(),
+        }
+    }
+
+    pub fn parse_indices_spec(spec: &str) -> anyhow::Result<Vec<usize>> {
+        let mut indices = Vec::new();
+        for raw_part in spec.split(',') {
+            let part = raw_part.trim();
+            if part.is_empty() {
+                anyhow::bail!("invalid track selection: empty item in {spec:?}");
+            }
+
+            if let Some((start, end)) = part.split_once('-') {
+                let start = parse_track_index(start.trim(), spec)?;
+                let end = parse_track_index(end.trim(), spec)?;
+                if start > end {
+                    anyhow::bail!(
+                        "invalid track selection: range {part:?} counts backward; use 1,3,5-8"
+                    );
+                }
+                indices.extend(start..=end);
+            } else {
+                indices.push(parse_track_index(part, spec)?);
+            }
+        }
+
+        indices.sort_unstable();
+        indices.dedup();
+        if indices.is_empty() {
+            anyhow::bail!("track selection cannot be empty");
+        }
+        Ok(indices)
+    }
+
     fn selected_album_songs<'a>(
         &self,
         album: &'a AlbumDetail,
@@ -69,6 +140,16 @@ impl TrackSelection {
             Self::SongIds(song_ids) => select_album_songs_by_ids(album, song_ids),
         }
     }
+}
+
+fn parse_track_index(value: &str, spec: &str) -> anyhow::Result<usize> {
+    let index: usize = value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid track selection {spec:?}; use 1,3,5-8"))?;
+    if index == 0 {
+        anyhow::bail!("invalid track selection {spec:?}; track numbers start at 1");
+    }
+    Ok(index)
 }
 
 fn select_album_songs_by_indices<'a>(
@@ -132,15 +213,39 @@ fn select_album_songs_by_ids<'a>(
 }
 
 impl DownloadContext {
-    fn new(progress: Option<Arc<Mutex<DownloadProgress>>>, sink: MaybeEventSink) -> Self {
-        Self { progress, sink }
+    fn new(progress: ProgressSnapshotAdapter, sink: MaybeEventSink) -> Self {
+        Self::new_cancelable(progress, sink, DownloadCancellation::new())
+    }
+
+    fn new_cancelable(
+        progress: ProgressSnapshotAdapter,
+        sink: MaybeEventSink,
+        cancellation: DownloadCancellation,
+    ) -> Self {
+        Self {
+            progress,
+            sink,
+            cancellation,
+        }
     }
 
     fn with_progress(progress: Option<Arc<Mutex<DownloadProgress>>>) -> Self {
-        Self {
-            progress,
-            sink: MaybeEventSink::none(),
+        let progress = progress
+            .map(ProgressSnapshotAdapter::from_progress_handle)
+            .unwrap_or_default();
+        Self::new(progress, MaybeEventSink::none())
+    }
+
+    fn emit(&self, event: DownloadEvent) {
+        self.progress.emit(event.clone());
+        self.sink.emit(event);
+    }
+
+    fn ensure_not_cancelled(&self) -> anyhow::Result<()> {
+        if self.cancellation.is_cancelled() {
+            anyhow::bail!("download cancelled");
         }
+        Ok(())
     }
 }
 
@@ -194,7 +299,7 @@ pub async fn download_album_with_options_progress<A: MusicSource>(
     let progress = progress.unwrap_or_else(|| {
         Arc::new(Mutex::new(DownloadProgress::new(
             &album.name,
-            selected_track_count(album, &options),
+            options.selected_track_count(album),
         )))
     });
     let ctx = DownloadContext::with_progress(Some(progress));
@@ -218,7 +323,26 @@ pub async fn download_album_with_options_events<A: MusicSource>(
     options: AlbumDownloadOptions,
     sink: impl EventSink + 'static,
 ) -> anyhow::Result<AlbumDownloadReport> {
-    let ctx = DownloadContext::new(None, MaybeEventSink::new(Some(Arc::new(sink))));
+    let ctx = DownloadContext::new(
+        ProgressSnapshotAdapter::new(),
+        MaybeEventSink::new(Some(Arc::new(sink))),
+    );
+    download_album_inner(api, album, config, &options, &ctx).await
+}
+
+pub async fn download_album_with_options_events_cancelable<A: MusicSource>(
+    api: &A,
+    album: &AlbumDetail,
+    config: &Config,
+    options: AlbumDownloadOptions,
+    sink: impl EventSink + 'static,
+    cancellation: DownloadCancellation,
+) -> anyhow::Result<AlbumDownloadReport> {
+    let ctx = DownloadContext::new_cancelable(
+        ProgressSnapshotAdapter::new(),
+        MaybeEventSink::new(Some(Arc::new(sink))),
+        cancellation,
+    );
     download_album_inner(api, album, config, &options, &ctx).await
 }
 
@@ -229,21 +353,21 @@ async fn download_album_inner<A: MusicSource>(
     options: &AlbumDownloadOptions,
     ctx: &DownloadContext,
 ) -> anyhow::Result<AlbumDownloadReport> {
-    let selected_count = selected_track_count(album, options);
-    ctx.sink.emit(DownloadEvent::AlbumStarted {
+    let selected_count = options.selected_track_count(album);
+    ctx.emit(DownloadEvent::AlbumStarted {
         album_name: album.name.clone(),
         total_tracks: selected_count,
     });
 
     match download_album_body(api, album, config, options, ctx).await {
         Ok(report) => {
-            ctx.sink.emit(DownloadEvent::AlbumFinished {
+            ctx.emit(DownloadEvent::AlbumFinished {
                 report: report.clone(),
             });
             Ok(report)
         }
         Err(e) => {
-            ctx.sink.emit(DownloadEvent::AlbumFailed {
+            ctx.emit(DownloadEvent::AlbumFailed {
                 error: e.to_string(),
             });
             Err(e)
@@ -258,16 +382,11 @@ async fn download_album_body<A: MusicSource>(
     options: &AlbumDownloadOptions,
     ctx: &DownloadContext,
 ) -> anyhow::Result<AlbumDownloadReport> {
+    ctx.ensure_not_cancelled()?;
     let selected_album_songs = options.track_selection.selected_album_songs(album)?;
     let selected_count = selected_album_songs.len();
-    let progress = ctx.progress.clone().unwrap_or_else(|| {
-        Arc::new(Mutex::new(DownloadProgress::new(
-            &album.name,
-            selected_count,
-        )))
-    });
-    let ctx = DownloadContext::new(Some(progress), ctx.sink.clone());
 
+    ctx.ensure_not_cancelled()?;
     let album_path = create_album_path(config, album)?;
 
     if config.download.include.album_info {
@@ -275,7 +394,7 @@ async fn download_album_body<A: MusicSource>(
     }
 
     let cover_data = if config.download.include.covers {
-        download_covers(api, &album_path, album, &ctx).await?
+        download_covers(api, &album_path, album, ctx).await?
     } else {
         None
     };
@@ -286,15 +405,10 @@ async fn download_album_body<A: MusicSource>(
 
     let mut song_details = Vec::with_capacity(total);
     for (selected_idx, (_, song_brief)) in selected_album_songs.into_iter().enumerate() {
+        ctx.ensure_not_cancelled()?;
         let progress_index = selected_idx + 1;
         let song_detail = api.get_song(&song_brief.cid).await?;
-        set_progress_status(
-            &ctx.progress,
-            progress_index,
-            &song_detail.name,
-            SongStatus::Queued,
-        );
-        ctx.sink.emit(DownloadEvent::TrackQueued {
+        ctx.emit(DownloadEvent::TrackQueued {
             index: progress_index,
             name: song_detail.name.clone(),
         });
@@ -306,6 +420,7 @@ async fn download_album_body<A: MusicSource>(
     let mut handles = Vec::new();
 
     for (progress_index, song_detail) in song_details {
+        ctx.ensure_not_cancelled()?;
         let api_clone = api.clone();
         let album_path_clone = album_path.clone();
         let config_clone = config.clone();
@@ -337,12 +452,13 @@ async fn download_album_body<A: MusicSource>(
     }
 
     for handle in handles {
+        ctx.ensure_not_cancelled()?;
         match handle.await {
             Ok(result) => {
                 if let Err(e) = result {
                     let message = format!("Download error: {}", e);
                     push_issue(
-                        &ctx,
+                        ctx,
                         DownloadIssue::new(DownloadIssueKind::Audio, "", message),
                     );
                 }
@@ -350,42 +466,27 @@ async fn download_album_body<A: MusicSource>(
             Err(e) => {
                 let message = format!("Task error: {}", e);
                 push_issue(
-                    &ctx,
+                    ctx,
                     DownloadIssue::new(DownloadIssueKind::Task, "", message),
                 );
             }
         }
     }
 
-    Ok(report_from_progress(&ctx.progress, album))
+    Ok(report_from_progress(ctx, album))
 }
 
-fn selected_track_count(album: &AlbumDetail, options: &AlbumDownloadOptions) -> usize {
-    match &options.track_selection {
-        TrackSelection::All => album.songs.len(),
-        TrackSelection::Indices(indices) => indices.iter().copied().collect::<HashSet<_>>().len(),
-        TrackSelection::SongIds(song_ids) => song_ids.iter().collect::<HashSet<_>>().len(),
-    }
-}
-
-fn report_from_progress(
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
-    album: &AlbumDetail,
-) -> AlbumDownloadReport {
-    progress
-        .as_ref()
-        .and_then(|progress| {
-            progress
-                .lock()
-                .ok()
-                .map(|progress| AlbumDownloadReport::from_progress(&progress))
-        })
-        .unwrap_or_else(|| AlbumDownloadReport {
+fn report_from_progress(ctx: &DownloadContext, album: &AlbumDetail) -> AlbumDownloadReport {
+    let progress = ctx.progress.snapshot();
+    if progress.album_name.is_empty() {
+        return AlbumDownloadReport {
             album_name: album.name.clone(),
             total_tracks: album.songs.len(),
             tracks: Vec::new(),
             issues: Vec::new(),
-        })
+        };
+    }
+    AlbumDownloadReport::from_progress(&progress)
 }
 
 fn create_album_path(config: &Config, album: &AlbumDetail) -> anyhow::Result<PathBuf> {
@@ -405,40 +506,29 @@ fn update_progress(
     file_progress: FileProgress,
 ) {
     let mut speed_bps = 0.0;
-    if let Some(ref p) = ctx.progress {
-        if let Ok(mut prog) = p.lock() {
-            let now = Instant::now();
-            let status = if file_progress.resumed {
-                SongStatus::Resuming
-            } else {
-                SongStatus::Getting
-            };
-            let task = prog.task_mut_or_insert(current_song, song_name, status);
-            let previous_bytes = task.bytes_downloaded;
-            let previous_update = task.last_update;
-            task.bytes_downloaded = file_progress.downloaded;
-            task.total_bytes = file_progress.total;
-            task.resumed = file_progress.resumed;
-            task.resume_from = file_progress.resume_from;
-            task.attempt = file_progress.attempt;
-            if let Some(previous_update) = previous_update {
-                let elapsed = now.duration_since(previous_update).as_secs_f64();
-                let bytes_since = file_progress.downloaded.saturating_sub(previous_bytes);
-                if elapsed > 0.0 && bytes_since > 0 {
-                    let instant_speed = bytes_since as f64 / elapsed;
-                    task.speed_bps = if task.speed_bps > 0.0 {
-                        task.speed_bps * 0.7 + instant_speed * 0.3
-                    } else {
-                        instant_speed
-                    };
-                }
+    let snapshot = ctx.progress.snapshot();
+    if let Some(task) = snapshot
+        .tasks
+        .iter()
+        .find(|task| task.index == current_song)
+    {
+        if let Some(previous_update) = task.last_update {
+            let elapsed = Instant::now().duration_since(previous_update).as_secs_f64();
+            let bytes_since = file_progress
+                .downloaded
+                .saturating_sub(task.bytes_downloaded);
+            if elapsed > 0.0 && bytes_since > 0 {
+                let instant_speed = bytes_since as f64 / elapsed;
+                speed_bps = if task.speed_bps > 0.0 {
+                    task.speed_bps * 0.7 + instant_speed * 0.3
+                } else {
+                    instant_speed
+                };
             }
-            task.last_update = Some(now);
-            speed_bps = task.speed_bps;
         }
     }
 
-    ctx.sink.emit(DownloadEvent::TrackProgress {
+    ctx.emit(DownloadEvent::TrackProgress {
         index: current_song,
         name: song_name.to_string(),
         downloaded: file_progress.downloaded,
@@ -449,16 +539,16 @@ fn update_progress(
 }
 
 fn set_progress_status(
-    progress: &Option<Arc<Mutex<DownloadProgress>>>,
+    ctx: &DownloadContext,
     current_song: usize,
     song_name: &str,
     status: SongStatus,
 ) {
-    if let Some(ref p) = progress {
-        if let Ok(mut prog) = p.lock() {
-            prog.task_mut_or_insert(current_song, song_name, status);
-        }
-    }
+    ctx.emit(DownloadEvent::TrackStatus {
+        index: current_song,
+        name: song_name.to_string(),
+        status,
+    });
 }
 
 fn finish_progress(
@@ -476,26 +566,7 @@ fn finish_progress(
         SongStatus::Done
     };
 
-    if let Some(ref p) = ctx.progress {
-        if let Ok(mut prog) = p.lock() {
-            let mut counted = false;
-            if let Some(task) = prog
-                .tasks
-                .iter_mut()
-                .find(|task| task.index == current_song)
-            {
-                counted = !task.is_done();
-                task.status = status;
-                task.speed_bps = 0.0;
-                task.last_update = Some(Instant::now());
-            }
-            if counted {
-                prog.completed_songs += 1;
-            }
-        }
-    }
-
-    ctx.sink.emit(DownloadEvent::TrackFinished {
+    ctx.emit(DownloadEvent::TrackFinished {
         index: current_song,
         name: song_name.to_string(),
         status,
@@ -503,13 +574,7 @@ fn finish_progress(
 }
 
 fn push_issue(ctx: &DownloadContext, issue: DownloadIssue) {
-    if let Some(ref p) = ctx.progress {
-        if let Ok(mut prog) = p.lock() {
-            prog.push_issue(issue.clone());
-        }
-    }
-
-    ctx.sink.emit(DownloadEvent::Issue { issue });
+    ctx.emit(DownloadEvent::Issue { issue });
 }
 
 fn save_album_info(path: &Path, album: &AlbumDetail) -> anyhow::Result<()> {
@@ -613,6 +678,7 @@ async fn download_song_with_progress<A: MusicSource>(
 
     let dest = fs_util::build_song_path(&config, &album_path, &song)?;
     let existing_converted_dest = fs_util::existing_converted_dest(&config, &dest, &song);
+    ctx.ensure_not_cancelled()?;
 
     let downloaded = if let Some(final_dest) = existing_converted_dest.as_deref() {
         skip_existing_converted_file(final_dest, &song, current, &ctx);
@@ -622,14 +688,16 @@ async fn download_song_with_progress<A: MusicSource>(
     };
 
     let lyrics_text = download_lyrics(api, &config, &album_path, &song, &ctx).await?;
+    ctx.ensure_not_cancelled()?;
 
     let final_dest = match existing_converted_dest {
         Some(path) => path,
         None => convert_if_needed(&config, &dest, &song, &ctx)?,
     };
+    ctx.ensure_not_cancelled()?;
 
     if downloaded {
-        set_progress_status(&ctx.progress, current, &song.name, SongStatus::Tagging);
+        set_progress_status(&ctx, current, &song.name, SongStatus::Tagging);
     }
 
     write_metadata_if_needed(MetadataWrite {
@@ -683,7 +751,8 @@ async fn download_audio_file<A: MusicSource>(
     _total: usize,
     ctx: &DownloadContext,
 ) -> anyhow::Result<bool> {
-    set_progress_status(&ctx.progress, current, &song.name, SongStatus::Checking);
+    set_progress_status(ctx, current, &song.name, SongStatus::Checking);
+    ctx.ensure_not_cancelled()?;
 
     if dest.exists() {
         if existing_file_is_complete(api, song, dest).await? {
@@ -708,14 +777,22 @@ async fn download_audio_file<A: MusicSource>(
     }
 
     let song_name = song.name.clone();
-    set_progress_status(&ctx.progress, current, &song_name, SongStatus::Getting);
+    set_progress_status(ctx, current, &song_name, SongStatus::Getting);
+    ctx.ensure_not_cancelled()?;
 
     let ctx_clone = ctx.clone();
     let mut on_progress = move |file_progress| {
         update_progress(&ctx_clone, current, &song_name, file_progress);
     };
+    let cancel_ctx = ctx.clone();
+    let should_cancel = move || cancel_ctx.cancellation.is_cancelled();
     let result = api
-        .download_file_with_progress(&song.source_url, dest, &mut on_progress)
+        .download_file_with_progress_cancelable(
+            &song.source_url,
+            dest,
+            &mut on_progress,
+            &should_cancel,
+        )
         .await;
 
     match result {
@@ -1080,6 +1157,25 @@ mod tests {
         assert!(root.join("Album").join("One.wav").exists());
         assert!(!root.join("Album").join("Two.wav").exists());
         assert!(root.join("Album").join("Three.wav").exists());
+    }
+
+    #[test]
+    fn track_selection_parse_indices_spec_accepts_lists_and_ranges() {
+        assert_eq!(
+            TrackSelection::parse_indices_spec("1,3,5-7").unwrap(),
+            vec![1, 3, 5, 6, 7]
+        );
+        assert_eq!(
+            TrackSelection::parse_indices_spec("3,1,3").unwrap(),
+            vec![1, 3]
+        );
+    }
+
+    #[test]
+    fn track_selection_parse_indices_spec_rejects_invalid_specs() {
+        assert!(TrackSelection::parse_indices_spec("3-1").is_err());
+        assert!(TrackSelection::parse_indices_spec("0").is_err());
+        assert!(TrackSelection::parse_indices_spec("1,,2").is_err());
     }
 
     #[tokio::test]

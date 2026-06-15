@@ -1,5 +1,6 @@
 pub mod api;
 pub mod config;
+pub mod download_session;
 pub mod downloader;
 pub mod file_fetcher;
 pub mod format;

@@ -72,21 +72,43 @@ pub async fn download_file_with_progress<F>(
 where
     F: FnMut(FileProgress),
 {
+    download_file_with_progress_cancelable(client, url, dest, &mut on_progress, || false).await
+}
+
+pub async fn download_file_with_progress_cancelable<F, C>(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+    mut on_progress: F,
+    should_cancel: C,
+) -> anyhow::Result<()>
+where
+    F: FnMut(FileProgress),
+    C: Fn() -> bool,
+{
     let max_retries = 6;
     let mut attempt = 0;
     let temp_dest = temp_download_path(dest);
     let metadata_dest = resume_metadata_path(&temp_dest);
+    let paths = DownloadPaths {
+        temp_dest: &temp_dest,
+        metadata_dest: &metadata_dest,
+    };
 
     loop {
+        if should_cancel() {
+            anyhow::bail!("download cancelled");
+        }
+
         attempt += 1;
         let result = try_download_with_progress(
             client,
             url,
             dest,
-            &temp_dest,
-            &metadata_dest,
+            &paths,
             attempt,
             &mut on_progress,
+            &should_cancel,
         )
         .await;
 
@@ -98,26 +120,38 @@ where
                 }
 
                 let delay_ms = (750 * attempt as u64).min(5_000);
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
+                    _ = async {
+                        while !should_cancel() {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        }
+                    } => anyhow::bail!("download cancelled"),
+                }
             }
         }
     }
 }
 
-async fn try_download_with_progress<F>(
+async fn try_download_with_progress<F, C>(
     client: &Client,
     url: &str,
     dest: &Path,
-    temp_dest: &Path,
-    metadata_dest: &Path,
+    paths: &DownloadPaths<'_>,
     attempt: u32,
     on_progress: &mut F,
+    should_cancel: &C,
 ) -> anyhow::Result<()>
 where
     F: FnMut(FileProgress),
+    C: Fn() -> bool,
 {
-    let metadata = load_resume_metadata(metadata_dest).await;
-    let mut resume_from = tokio::fs::metadata(temp_dest)
+    if should_cancel() {
+        anyhow::bail!("download cancelled");
+    }
+
+    let metadata = load_resume_metadata(paths.metadata_dest).await;
+    let mut resume_from = tokio::fs::metadata(paths.temp_dest)
         .await
         .map(|metadata| metadata.len())
         .unwrap_or(0);
@@ -131,12 +165,12 @@ where
                     .expected_total
                     .is_some_and(|expected_total| resume_from > expected_total)
                 {
-                    reset_partial_download(temp_dest, metadata_dest).await;
+                    reset_partial_download(paths.temp_dest, paths.metadata_dest).await;
                     resume_from = 0;
                 }
             }
             Some(_) => {
-                reset_partial_download(temp_dest, metadata_dest).await;
+                reset_partial_download(paths.temp_dest, paths.metadata_dest).await;
                 resume_from = 0;
             }
             None => {}
@@ -150,8 +184,11 @@ where
     }
 
     let resp = request.send().await?;
+    if should_cancel() {
+        anyhow::bail!("download cancelled");
+    }
     if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
-        reset_partial_download(temp_dest, metadata_dest).await;
+        reset_partial_download(paths.temp_dest, paths.metadata_dest).await;
         anyhow::bail!("server rejected resume range");
     }
 
@@ -160,14 +197,14 @@ where
     let resp = resp.error_for_status()?;
 
     if resume_from > 0 && status != StatusCode::PARTIAL_CONTENT {
-        reset_partial_download(temp_dest, metadata_dest).await;
+        reset_partial_download(paths.temp_dest, paths.metadata_dest).await;
         resume_from = 0;
     } else if resume_from > 0
         && metadata
             .as_ref()
             .is_some_and(|metadata| !metadata.matches_response_headers(&headers))
     {
-        reset_partial_download(temp_dest, metadata_dest).await;
+        reset_partial_download(paths.temp_dest, paths.metadata_dest).await;
         anyhow::bail!("remote file changed since partial download was created");
     }
 
@@ -179,7 +216,7 @@ where
     };
     let expected_total = (total_size > 0).then_some(total_size);
     save_resume_metadata(
-        metadata_dest,
+        paths.metadata_dest,
         &ResumeMetadata::from_headers(url, expected_total, &headers),
     )
     .await?;
@@ -187,10 +224,10 @@ where
     let mut file = if resume_from > 0 {
         tokio::fs::OpenOptions::new()
             .append(true)
-            .open(temp_dest)
+            .open(paths.temp_dest)
             .await?
     } else {
-        tokio::fs::File::create(temp_dest).await?
+        tokio::fs::File::create(paths.temp_dest).await?
     };
     let mut stream = resp.bytes_stream();
     let mut downloaded = resume_from;
@@ -208,6 +245,9 @@ where
     }
 
     while let Some(chunk) = stream.next().await {
+        if should_cancel() {
+            anyhow::bail!("download cancelled");
+        }
         let chunk = chunk?;
         let chunk_len = chunk.len() as u64;
         file.write_all(&chunk).await?;
@@ -241,8 +281,8 @@ where
         );
     }
 
-    tokio::fs::rename(temp_dest, dest).await?;
-    let _ = tokio::fs::remove_file(metadata_dest).await;
+    tokio::fs::rename(paths.temp_dest, dest).await?;
+    let _ = tokio::fs::remove_file(paths.metadata_dest).await;
     on_progress(FileProgress {
         downloaded,
         total: total_size,
@@ -251,6 +291,11 @@ where
         attempt,
     });
     Ok(())
+}
+
+struct DownloadPaths<'a> {
+    temp_dest: &'a Path,
+    metadata_dest: &'a Path,
 }
 
 async fn load_resume_metadata(path: &Path) -> Option<ResumeMetadata> {
@@ -552,6 +597,28 @@ mod tests {
 
         assert_eq!(std::fs::read(&dest).unwrap(), body);
         assert!(server.request_count() >= 2);
+    }
+
+    #[tokio::test]
+    async fn download_file_with_progress_cancelable_stops_before_request() {
+        let server = TestServer::spawn(|_request, _| Response::ok(b"audio", "v1"));
+        let root = test_dir("cancel-before-request");
+        let dest = root.join("song.bin");
+
+        let error = download_file_with_progress_cancelable(
+            &reqwest::Client::new(),
+            &server.url(),
+            &dest,
+            |_| {},
+            || true,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("cancelled"));
+        assert_eq!(server.request_count(), 0);
+        assert!(!dest.exists());
     }
 
     struct TestServer {

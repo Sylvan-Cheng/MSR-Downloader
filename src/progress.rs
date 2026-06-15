@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Trait for receiving download events.
@@ -47,6 +47,48 @@ impl<F: Fn(DownloadEvent) + Send + Sync> EventSink for F {
 impl EventSink for tokio::sync::mpsc::UnboundedSender<DownloadEvent> {
     fn emit(&self, event: DownloadEvent) {
         let _ = self.send(event);
+    }
+}
+
+#[derive(Clone)]
+pub struct ProgressSnapshotAdapter {
+    progress: Arc<Mutex<DownloadProgress>>,
+}
+
+impl ProgressSnapshotAdapter {
+    pub fn new() -> Self {
+        Self {
+            progress: Arc::new(Mutex::new(DownloadProgress::new("", 0))),
+        }
+    }
+
+    pub fn from_progress_handle(progress: Arc<Mutex<DownloadProgress>>) -> Self {
+        Self { progress }
+    }
+
+    pub fn snapshot(&self) -> DownloadProgress {
+        self.progress
+            .lock()
+            .expect("progress snapshot lock poisoned")
+            .clone()
+    }
+
+    pub fn progress_handle(&self) -> Arc<Mutex<DownloadProgress>> {
+        self.progress.clone()
+    }
+}
+
+impl Default for ProgressSnapshotAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EventSink for ProgressSnapshotAdapter {
+    fn emit(&self, event: DownloadEvent) {
+        if let Ok(mut progress) = self.progress.lock() {
+            apply_event_to_progress(&mut progress, event);
+        }
     }
 }
 
@@ -405,6 +447,12 @@ pub enum DownloadEvent {
     #[serde(rename_all = "camelCase")]
     TrackQueued { index: usize, name: String },
     #[serde(rename_all = "camelCase")]
+    TrackStatus {
+        index: usize,
+        name: String,
+        status: SongStatus,
+    },
+    #[serde(rename_all = "camelCase")]
     TrackProgress {
         index: usize,
         name: String,
@@ -425,6 +473,88 @@ pub enum DownloadEvent {
     AlbumFinished { report: AlbumDownloadReport },
     #[serde(rename_all = "camelCase")]
     AlbumFailed { error: String },
+}
+
+fn apply_event_to_progress(progress: &mut DownloadProgress, event: DownloadEvent) {
+    match event {
+        DownloadEvent::AlbumStarted {
+            album_name,
+            total_tracks,
+        } => {
+            *progress = DownloadProgress::new(&album_name, total_tracks);
+        }
+        DownloadEvent::TrackQueued { index, name } => {
+            progress.task_mut_or_insert(index, &name, SongStatus::Queued);
+        }
+        DownloadEvent::TrackStatus {
+            index,
+            name,
+            status,
+        } => {
+            progress.task_mut_or_insert(index, &name, status);
+        }
+        DownloadEvent::TrackProgress {
+            index,
+            name,
+            downloaded,
+            total,
+            speed_bps,
+            resumed,
+        } => {
+            let status = if resumed {
+                SongStatus::Resuming
+            } else {
+                SongStatus::Getting
+            };
+            let task = progress.task_mut_or_insert(index, &name, status);
+            task.bytes_downloaded = downloaded;
+            task.total_bytes = total;
+            task.speed_bps = speed_bps;
+            task.resumed = resumed;
+            task.last_update = Some(Instant::now());
+        }
+        DownloadEvent::TrackFinished {
+            index,
+            name,
+            status,
+        } => {
+            let (task, was_done) = if let Some(position) =
+                progress.tasks.iter().position(|task| task.index == index)
+            {
+                let task = &mut progress.tasks[position];
+                let was_done = task.is_done();
+                (task, was_done)
+            } else {
+                progress.tasks.push(SongProgress::new(index, &name, status));
+                (progress.tasks.last_mut().expect("task inserted"), false)
+            };
+            task.name = name;
+            task.status = status;
+            task.speed_bps = 0.0;
+            task.last_update = Some(Instant::now());
+            if !was_done && task.is_done() {
+                progress.completed_songs += 1;
+            }
+        }
+        DownloadEvent::Issue { issue } => {
+            progress.push_issue(issue);
+        }
+        DownloadEvent::AlbumFinished { report } => {
+            progress.album_name = report.album_name;
+            progress.total_songs = report.total_tracks;
+            progress.issues = report.issues;
+            progress.errors = progress.issues.iter().map(DownloadIssue::summary).collect();
+            for track in report.tracks {
+                let task = progress.task_mut_or_insert(track.index, &track.name, track.status);
+                task.status = track.status;
+                task.speed_bps = 0.0;
+            }
+            progress.completed_songs = progress.tasks.iter().filter(|task| task.is_done()).count();
+        }
+        DownloadEvent::AlbumFailed { error } => {
+            progress.push_issue(DownloadIssue::new(DownloadIssueKind::Album, "", error));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -480,6 +610,65 @@ mod tests {
         assert_eq!(json, "getting");
         let json = serde_json::to_value(SongStatus::Failed).unwrap();
         assert_eq!(json, "failed");
+    }
+
+    #[test]
+    fn progress_snapshot_adapter_maps_track_lifecycle_events() {
+        let adapter = ProgressSnapshotAdapter::new();
+
+        adapter.emit(DownloadEvent::AlbumStarted {
+            album_name: "Album".to_string(),
+            total_tracks: 1,
+        });
+        adapter.emit(DownloadEvent::TrackQueued {
+            index: 1,
+            name: "Song".to_string(),
+        });
+        adapter.emit(DownloadEvent::TrackProgress {
+            index: 1,
+            name: "Song".to_string(),
+            downloaded: 50,
+            total: 100,
+            speed_bps: 25.0,
+            resumed: false,
+        });
+        adapter.emit(DownloadEvent::TrackFinished {
+            index: 1,
+            name: "Song".to_string(),
+            status: SongStatus::Done,
+        });
+
+        let snapshot = adapter.snapshot();
+        assert_eq!(snapshot.album_name, "Album");
+        assert_eq!(snapshot.total_songs, 1);
+        assert_eq!(snapshot.completed_songs, 1);
+        assert_eq!(snapshot.ok_count(), 1);
+        assert_eq!(snapshot.tasks[0].bytes_downloaded, 50);
+        assert_eq!(snapshot.tasks[0].total_bytes, 100);
+        assert_eq!(snapshot.tasks[0].status, SongStatus::Done);
+    }
+
+    #[test]
+    fn progress_snapshot_adapter_maps_failure_events() {
+        let adapter = ProgressSnapshotAdapter::new();
+
+        adapter.emit(DownloadEvent::AlbumStarted {
+            album_name: "Album".to_string(),
+            total_tracks: 1,
+        });
+        adapter.emit(DownloadEvent::TrackFinished {
+            index: 1,
+            name: "Broken".to_string(),
+            status: SongStatus::Failed,
+        });
+        adapter.emit(DownloadEvent::Issue {
+            issue: DownloadIssue::new(DownloadIssueKind::Audio, "Broken", "download failed"),
+        });
+
+        let snapshot = adapter.snapshot();
+        assert_eq!(snapshot.completed_songs, 1);
+        assert_eq!(snapshot.failed_count(), 1);
+        assert_eq!(snapshot.errors, vec!["audio Broken: download failed"]);
     }
 
     #[test]

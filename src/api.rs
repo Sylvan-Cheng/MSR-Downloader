@@ -27,6 +27,20 @@ pub trait MusicSource: Clone + Send + Sync + 'static {
         dest: &Path,
         on_progress: &mut (dyn FnMut(FileProgress) + Send),
     ) -> anyhow::Result<()>;
+
+    async fn download_file_with_progress_cancelable(
+        &self,
+        url: &str,
+        dest: &Path,
+        on_progress: &mut (dyn FnMut(FileProgress) + Send),
+        should_cancel: &(dyn Fn() -> bool + Send + Sync),
+    ) -> anyhow::Result<()> {
+        if should_cancel() {
+            anyhow::bail!("download cancelled");
+        }
+        self.download_file_with_progress(url, dest, on_progress)
+            .await
+    }
 }
 
 #[async_trait]
@@ -58,6 +72,23 @@ impl MusicSource for ApiClient {
         on_progress: &mut (dyn FnMut(FileProgress) + Send),
     ) -> anyhow::Result<()> {
         ApiClient::download_file_with_progress(self, url, dest, on_progress).await
+    }
+
+    async fn download_file_with_progress_cancelable(
+        &self,
+        url: &str,
+        dest: &Path,
+        on_progress: &mut (dyn FnMut(FileProgress) + Send),
+        should_cancel: &(dyn Fn() -> bool + Send + Sync),
+    ) -> anyhow::Result<()> {
+        ApiClient::download_file_with_progress_cancelable(
+            self,
+            url,
+            dest,
+            on_progress,
+            should_cancel,
+        )
+        .await
     }
 }
 
@@ -127,5 +158,26 @@ impl ApiClient {
         F: FnMut(FileProgress),
     {
         file_fetcher::download_file_with_progress(&self.client, url, dest, on_progress).await
+    }
+
+    pub async fn download_file_with_progress_cancelable<F, C>(
+        &self,
+        url: &str,
+        dest: &Path,
+        on_progress: F,
+        should_cancel: C,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(FileProgress),
+        C: Fn() -> bool,
+    {
+        file_fetcher::download_file_with_progress_cancelable(
+            &self.client,
+            url,
+            dest,
+            on_progress,
+            should_cancel,
+        )
+        .await
     }
 }
