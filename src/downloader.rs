@@ -285,26 +285,27 @@ async fn download_album_body<A: MusicSource>(
     let total = selected_count;
 
     let mut song_details = Vec::with_capacity(total);
-    for (idx, song_brief) in selected_album_songs {
+    for (selected_idx, (_, song_brief)) in selected_album_songs.into_iter().enumerate() {
+        let progress_index = selected_idx + 1;
         let song_detail = api.get_song(&song_brief.cid).await?;
         set_progress_status(
             &ctx.progress,
-            idx + 1,
+            progress_index,
             &song_detail.name,
             SongStatus::Queued,
         );
         ctx.sink.emit(DownloadEvent::TrackQueued {
-            index: idx + 1,
+            index: progress_index,
             name: song_detail.name.clone(),
         });
-        song_details.push((idx, song_detail));
+        song_details.push((progress_index, song_detail));
     }
 
     fs_util::validate_song_destinations(config, &album_path, &song_details)?;
 
     let mut handles = Vec::new();
 
-    for (idx, song_detail) in song_details {
+    for (progress_index, song_detail) in song_details {
         let api_clone = api.clone();
         let album_path_clone = album_path.clone();
         let config_clone = config.clone();
@@ -323,7 +324,7 @@ async fn download_album_body<A: MusicSource>(
                     song: song_detail,
                     album: album_clone,
                     config: config_clone,
-                    current: idx + 1,
+                    current: progress_index,
                     total,
                     cover_data: cover_data_clone,
                     ctx: ctx_clone,
@@ -1041,19 +1042,37 @@ mod tests {
             .files
             .insert("mock://three.wav".to_string(), b"three".to_vec());
         let config = test_config(root.clone());
+        let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let report = download_album_with_options_progress(
+        let report = download_album_with_options_events(
             &source,
             source.album_details.get("album").unwrap(),
             &config,
             AlbumDownloadOptions::track_indices(vec![1, 3]),
-            None,
+            tx,
         )
         .await
         .unwrap();
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let queued: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                DownloadEvent::TrackQueued { index, .. } => Some(*index),
+                _ => None,
+            })
+            .collect();
 
         assert_eq!(report.total_tracks, 2);
         assert_eq!(report.ok_count(), 2);
+        assert_eq!(
+            report
+                .tracks
+                .iter()
+                .map(|track| track.index)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(queued, vec![1, 2]);
         assert_eq!(
             *source.audio_calls.lock().unwrap(),
             vec!["mock://one.wav".to_string(), "mock://three.wav".to_string()]
