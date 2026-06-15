@@ -284,34 +284,21 @@ wav_to_flac = true
     }
 
     #[test]
-    fn validate_rejects_unsafe_templates() {
+    fn validate_rejects_invalid_values() {
         let mut config = Config::default();
         config.naming.song_file = "../{song_name}.{ext}".to_string();
-
         assert!(config.validate().is_err());
-    }
 
-    #[test]
-    fn validate_rejects_unknown_template_placeholders() {
         let mut config = Config::default();
         config.naming.song_file = "{artist}-{song_name}.{ext}".to_string();
-
         assert!(config.validate().is_err());
-    }
 
-    #[test]
-    fn validate_rejects_special_path_components() {
         let mut config = Config::default();
         config.naming.album_folder = ".".to_string();
-
         assert!(config.validate().is_err());
-    }
 
-    #[test]
-    fn validate_rejects_out_of_range_compression() {
         let mut config = Config::default();
         config.download.convert.flac_compression = 9;
-
         assert!(config.validate().is_err());
     }
 }

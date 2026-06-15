@@ -455,10 +455,7 @@ mod tests {
         assert!(json.contains(r#""type":"albumStarted""#), "got: {json}");
         assert!(json.contains(r#""albumName":"Test""#), "got: {json}");
         assert!(json.contains(r#""totalTracks":5"#), "got: {json}");
-    }
 
-    #[test]
-    fn download_event_track_progress_json_shape() {
         let event = DownloadEvent::TrackProgress {
             index: 1,
             name: "Song".to_string(),
@@ -471,20 +468,14 @@ mod tests {
         assert!(json.contains(r#""type":"trackProgress""#), "got: {json}");
         assert!(json.contains(r#""index":1"#), "got: {json}");
         assert!(json.contains(r#""speedBps":512.0"#), "got: {json}");
-    }
 
-    #[test]
-    fn download_event_album_failed_json_shape() {
         let event = DownloadEvent::AlbumFailed {
             error: "network error".to_string(),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "albumFailed");
         assert_eq!(json["error"], "network error");
-    }
 
-    #[test]
-    fn song_status_json_is_camel_case() {
         let json = serde_json::to_value(SongStatus::Getting).unwrap();
         assert_eq!(json, "getting");
         let json = serde_json::to_value(SongStatus::Failed).unwrap();
@@ -492,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn track_failure_count_does_not_double_count_audio_issues() {
+    fn track_failure_count_handles_audio_and_task_issues() {
         let report = AlbumDownloadReport {
             album_name: "test".to_string(),
             total_tracks: 1,
@@ -511,10 +502,7 @@ mod tests {
         assert_eq!(report.failed_count(), 1);
         assert_eq!(report.track_failure_count(), 1);
         assert!(report.has_track_failures());
-    }
 
-    #[test]
-    fn track_failure_count_includes_task_issues_without_track() {
         let report = AlbumDownloadReport {
             album_name: "test".to_string(),
             total_tracks: 2,

@@ -97,10 +97,7 @@ mod tests {
         assert_eq!(song.source_url, "https://example.com/song.wav");
         assert!(song.lyric_url.is_some());
         assert!(song.mv_url.is_none());
-    }
 
-    #[test]
-    fn test_parse_song_detail_optional_fields() {
         let json = r#"{
             "cid": "789",
             "name": "Minimal Song",

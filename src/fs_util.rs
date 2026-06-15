@@ -127,9 +127,14 @@ mod tests {
     fn test_sanitize() {
         assert_eq!(sanitize("test:file?name"), "test file name");
         assert_eq!(sanitize("test*file|name"), "test file name");
+        assert_eq!(sanitize("song:name/test"), "song name test");
+        assert_eq!(sanitize("歌曲名称"), "歌曲名称");
+        assert_eq!(sanitize("song.name.mp3"), "song.name.mp3");
+        assert_eq!(sanitize(".hidden"), "hidden");
         assert_eq!(sanitize("  test file  "), "test file");
         assert_eq!(sanitize("normal_file.mp3"), "normal_file.mp3");
         assert_eq!(sanitize("???"), "untitled");
+        assert_eq!(sanitize("..."), "untitled");
     }
 
     #[test]
@@ -140,7 +145,16 @@ mod tests {
             "wav"
         );
         assert_eq!(ext_from_url("https://example.com/file.flac"), "flac");
+        assert_eq!(
+            ext_from_url("https://cdn.example.com/path/to/file.mp3?token=abc&size=100"),
+            "mp3"
+        );
+        assert_eq!(
+            ext_from_url("https://example.com/file.name.with.dots.flac"),
+            "flac"
+        );
         assert_eq!(ext_from_url("https://example.com/path/noext"), "bin");
+        assert_eq!(ext_from_url("https://example.com/"), "bin");
     }
 
     #[test]
@@ -148,17 +162,15 @@ mod tests {
         let base = Path::new("album");
 
         assert!(safe_join_child(base, "../song.mp3").is_err());
+        assert!(safe_join_child(base, "foo/../../escape").is_err());
         assert!(safe_join_child(base, "nested/song.mp3").is_err());
+        assert!(safe_join_child(base, "/etc/passwd").is_err());
+        assert!(safe_join_child(base, "").is_err());
+        assert!(safe_join_child(base, "  ").is_err());
         assert_eq!(
             safe_join_child(base, "song.mp3").unwrap(),
             base.join("song.mp3")
         );
-    }
-
-    #[test]
-    fn safe_join_child_rejects_empty() {
-        assert!(safe_join_child(Path::new("base"), "").is_err());
-        assert!(safe_join_child(Path::new("base"), "  ").is_err());
     }
 
     #[test]
@@ -243,43 +255,6 @@ mod tests {
         assert!(existing_converted_dest(&config, &wav_path, &song_detail("1", "song")).is_none());
 
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn safe_join_child_rejects_dot_dot_components() {
-        assert!(safe_join_child(Path::new("base"), "../escape").is_err());
-        assert!(safe_join_child(Path::new("base"), "foo/../../escape").is_err());
-    }
-
-    #[test]
-    fn safe_join_child_rejects_absolute_paths() {
-        assert!(safe_join_child(Path::new("base"), "/etc/passwd").is_err());
-    }
-
-    #[test]
-    fn sanitize_handles_unicode() {
-        assert_eq!(sanitize("歌曲名称"), "歌曲名称");
-        assert_eq!(sanitize("song:name/test"), "song name test");
-    }
-
-    #[test]
-    fn sanitize_preserves_dots_in_middle() {
-        assert_eq!(sanitize("song.name.mp3"), "song.name.mp3");
-        assert_eq!(sanitize(".hidden"), "hidden");
-        assert_eq!(sanitize("..."), "untitled");
-    }
-
-    #[test]
-    fn ext_from_url_handles_complex_paths() {
-        assert_eq!(
-            ext_from_url("https://cdn.example.com/path/to/file.mp3?token=abc&size=100"),
-            "mp3"
-        );
-        assert_eq!(
-            ext_from_url("https://example.com/file.name.with.dots.flac"),
-            "flac"
-        );
-        assert_eq!(ext_from_url("https://example.com/"), "bin");
     }
 
     #[test]
