@@ -1,5 +1,5 @@
 use crate::tui::state::AppScreen;
-use crate::tui::theme::{COLOR_INFO, COLOR_PRIMARY};
+use crate::tui::theme::COLOR_PRIMARY;
 use crate::tui::theme::{COLOR_MUTED, COLOR_SECONDARY};
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -59,25 +59,17 @@ pub(crate) fn draw_controls_bar(
     f.render_widget(controls, area);
 }
 
-pub(crate) fn controls_line(items: &'static [(&'static str, &'static str)]) -> Line<'static> {
-    Line::from(
-        items
-            .iter()
-            .flat_map(|(key, label)| {
-                [
-                    Span::styled(*key, Style::default().fg(COLOR_INFO)),
-                    Span::raw(*label),
-                ]
-            })
-            .collect::<Vec<_>>(),
-    )
-}
-
 #[cfg(test)]
 pub(crate) fn controls_text(items: &[(&str, &str)]) -> String {
     items.iter().fold(String::new(), |mut text, (key, label)| {
+        text.push('[');
         text.push_str(key);
-        text.push_str(label);
+        let label = label.trim();
+        if !label.is_empty() {
+            text.push(' ');
+            text.push_str(label);
+        }
+        text.push_str("] ");
         text
     })
 }

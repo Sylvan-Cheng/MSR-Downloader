@@ -24,18 +24,63 @@ pub fn validate_cli_action(cli: &super::Cli) -> anyhow::Result<()> {
         return Err(no_cli_action_error());
     }
 
+    if cli.tracks.is_some() && cli.all {
+        anyhow::bail!("--tracks can only be used with --album or --album-id, not --all");
+    }
+
     Ok(())
+}
+
+pub fn parse_track_selection_spec(spec: &str) -> anyhow::Result<Vec<usize>> {
+    let mut indices = Vec::new();
+    for raw_part in spec.split(',') {
+        let part = raw_part.trim();
+        if part.is_empty() {
+            anyhow::bail!("invalid track selection: empty item in {spec:?}");
+        }
+
+        if let Some((start, end)) = part.split_once('-') {
+            let start = parse_track_index(start.trim(), spec)?;
+            let end = parse_track_index(end.trim(), spec)?;
+            if start > end {
+                anyhow::bail!(
+                    "invalid track selection: range {part:?} counts backward; use 1,3,5-8"
+                );
+            }
+            indices.extend(start..=end);
+        } else {
+            indices.push(parse_track_index(part, spec)?);
+        }
+    }
+
+    indices.sort_unstable();
+    indices.dedup();
+    if indices.is_empty() {
+        anyhow::bail!("track selection cannot be empty");
+    }
+    Ok(indices)
+}
+
+fn parse_track_index(value: &str, spec: &str) -> anyhow::Result<usize> {
+    let index: usize = value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid track selection {spec:?}; use 1,3,5-8"))?;
+    if index == 0 {
+        anyhow::bail!("invalid track selection {spec:?}; track numbers start at 1");
+    }
+    Ok(index)
 }
 
 pub async fn download_album<A: MusicSource>(
     api: &A,
     album: &models::AlbumDetail,
     config: &Config,
+    options: downloader::AlbumDownloadOptions,
     progress_mode: cli_progress::CliProgressMode,
 ) -> anyhow::Result<()> {
     let progress = Arc::new(Mutex::new(DownloadProgress::new(
         &album.name,
-        album.songs.len(),
+        selected_track_count(album, &options),
     )));
     let progress_clone = progress.clone();
     let download = tokio::spawn({
@@ -43,8 +88,14 @@ pub async fn download_album<A: MusicSource>(
         let album = album.clone();
         let config = config.clone();
         async move {
-            downloader::download_album_with_progress(&api, &album, &config, Some(progress_clone))
-                .await
+            downloader::download_album_with_options_progress(
+                &api,
+                &album,
+                &config,
+                options,
+                Some(progress_clone),
+            )
+            .await
         }
     });
 
@@ -63,6 +114,57 @@ pub async fn download_album<A: MusicSource>(
                 .collect::<Vec<_>>()
                 .join("; ")
         );
+    }
+    Ok(())
+}
+
+fn selected_track_count(
+    album: &models::AlbumDetail,
+    options: &downloader::AlbumDownloadOptions,
+) -> usize {
+    match &options.track_selection {
+        downloader::TrackSelection::All => album.songs.len(),
+        downloader::TrackSelection::Indices(indices) => indices.len(),
+        downloader::TrackSelection::SongIds(song_ids) => song_ids.len(),
+    }
+}
+
+fn options_from_tracks(tracks: Option<&str>) -> anyhow::Result<downloader::AlbumDownloadOptions> {
+    tracks
+        .map(parse_track_selection_spec)
+        .transpose()
+        .map(|indices| {
+            indices
+                .map(downloader::AlbumDownloadOptions::track_indices)
+                .unwrap_or_else(downloader::AlbumDownloadOptions::all_tracks)
+        })
+}
+
+fn print_selected_tracks(
+    album: &models::AlbumDetail,
+    options: &downloader::AlbumDownloadOptions,
+) -> anyhow::Result<()> {
+    let indices = match &options.track_selection {
+        downloader::TrackSelection::All => return Ok(()),
+        downloader::TrackSelection::Indices(indices) => indices,
+        downloader::TrackSelection::SongIds(_) => return Ok(()),
+    };
+
+    println!(
+        "{} SELECTED {} / {} TRACKS",
+        cli_style::msr(),
+        indices.len(),
+        album.songs.len()
+    );
+    for &index in indices {
+        let Some(song) = album.songs.get(index - 1) else {
+            anyhow::bail!(
+                "track index {index} is out of range for album {} with {} track(s)",
+                album.name,
+                album.songs.len()
+            );
+        };
+        println!("  {:02}  {}", index, song.name);
     }
     Ok(())
 }
@@ -93,7 +195,15 @@ pub async fn download_all<A: MusicSource>(
         );
         match api.get_album_detail(&album_brief.cid).await {
             Ok(album_detail) => {
-                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
+                if let Err(e) = download_album(
+                    api,
+                    &album_detail,
+                    config,
+                    downloader::AlbumDownloadOptions::all_tracks(),
+                    progress_mode,
+                )
+                .await
+                {
                     if cli_progress::is_interrupted(&e) {
                         return Err(e);
                     }
@@ -128,6 +238,7 @@ pub async fn download_albums_by_name<A: MusicSource>(
     exact: bool,
     dry_run: bool,
     progress_mode: cli_progress::CliProgressMode,
+    tracks: Option<&str>,
 ) -> anyhow::Result<()> {
     let albums = api.get_albums().await?;
     let matched: Vec<_> = albums
@@ -149,7 +260,16 @@ pub async fn download_albums_by_name<A: MusicSource>(
 
     print_matched_albums("MATCHING", &matched);
 
+    if tracks.is_some() && matched.len() != 1 {
+        anyhow::bail!("--tracks requires exactly one matched album; use --exact or --album-id");
+    }
+
     if dry_run {
+        if let Some(tracks) = tracks {
+            let album_detail = api.get_album_detail(&matched[0].cid).await?;
+            let options = options_from_tracks(Some(tracks))?;
+            print_selected_tracks(&album_detail, &options)?;
+        }
         return Ok(());
     }
 
@@ -162,7 +282,11 @@ pub async fn download_albums_by_name<A: MusicSource>(
         );
         match api.get_album_detail(&album_brief.cid).await {
             Ok(album_detail) => {
-                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
+                let options = options_from_tracks(tracks)?;
+                print_selected_tracks(&album_detail, &options)?;
+                if let Err(e) =
+                    download_album(api, &album_detail, config, options, progress_mode).await
+                {
                     if cli_progress::is_interrupted(&e) {
                         return Err(e);
                     }
@@ -196,6 +320,7 @@ pub async fn download_albums_by_id<A: MusicSource>(
     ids: &[String],
     dry_run: bool,
     progress_mode: cli_progress::CliProgressMode,
+    tracks: Option<&str>,
 ) -> anyhow::Result<()> {
     let albums = api.get_albums().await?;
     let matched: Vec<_> = albums
@@ -209,7 +334,16 @@ pub async fn download_albums_by_id<A: MusicSource>(
 
     print_matched_albums("MATCHING", &matched);
 
+    if tracks.is_some() && matched.len() != 1 {
+        anyhow::bail!("--tracks requires exactly one matched album CID");
+    }
+
     if dry_run {
+        if let Some(tracks) = tracks {
+            let album_detail = api.get_album_detail(&matched[0].cid).await?;
+            let options = options_from_tracks(Some(tracks))?;
+            print_selected_tracks(&album_detail, &options)?;
+        }
         return Ok(());
     }
 
@@ -222,7 +356,11 @@ pub async fn download_albums_by_id<A: MusicSource>(
         );
         match api.get_album_detail(&album_brief.cid).await {
             Ok(album_detail) => {
-                if let Err(e) = download_album(api, &album_detail, config, progress_mode).await {
+                let options = options_from_tracks(tracks)?;
+                print_selected_tracks(&album_detail, &options)?;
+                if let Err(e) =
+                    download_album(api, &album_detail, config, options, progress_mode).await
+                {
                     if cli_progress::is_interrupted(&e) {
                         return Err(e);
                     }

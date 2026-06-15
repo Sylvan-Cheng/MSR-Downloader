@@ -5,6 +5,8 @@ pub(crate) mod config;
 
 pub use args::Cli;
 pub use clean::{clean_partial_files, CleanPartsResult};
+#[cfg(test)]
+pub use commands::parse_track_selection_spec;
 pub use commands::{
     download_albums_by_id, download_albums_by_name, download_all, no_cli_action_error,
     validate_cli_action,

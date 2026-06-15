@@ -6,7 +6,7 @@ use std::path::PathBuf;
     name = "msr-downloader",
     version,
     about = "Monster Siren Music Downloader",
-    after_help = "Examples:\n  msr-downloader\n  msr-downloader --init-config\n  msr-downloader --check-config\n  msr-downloader --cli --list\n  msr-downloader --cli --album \"春弦\"\n  msr-downloader --cli --album \"春弦\" --exact --dry-run\n  msr-downloader --cli --album-id 123456\n  msr-downloader --cli --all --dry-run\n  msr-downloader --cli --all --output ./music\n  msr-downloader --clean-parts --dry-run\n  msr-downloader --clean-parts --yes"
+    after_help = "Examples:\n  msr-downloader\n  msr-downloader --init-config\n  msr-downloader --check-config\n  msr-downloader --cli --list\n  msr-downloader --cli --album \"春弦\"\n  msr-downloader --cli --album \"春弦\" --tracks 1,3,5-8\n  msr-downloader --cli --album \"春弦\" --exact --dry-run\n  msr-downloader --cli --album-id 123456\n  msr-downloader --cli --all --dry-run\n  msr-downloader --cli --all --output ./music\n  msr-downloader --clean-parts --dry-run\n  msr-downloader --clean-parts --yes"
 )]
 pub struct Cli {
     #[arg(
@@ -48,6 +48,13 @@ pub struct Cli {
         help = "Download all albums; required for full-library CLI downloads"
     )]
     pub all: bool,
+    #[arg(
+        long,
+        value_name = "LIST",
+        help_heading = "Download",
+        help = "Download selected 1-based tracks, e.g. 1,3,5-8"
+    )]
+    pub tracks: Option<String>,
     #[arg(
         long,
         help_heading = "General",

@@ -28,14 +28,17 @@ use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
-use tui::download::{current_transfer_index, draw_download_screen};
+use tui::download::{
+    current_transfer_index, download_control_button_at, draw_download_screen, DownloadControlButton,
+};
 use tui::input::{album_mouse_action, is_key, screen_from_header_click};
 use tui::layout::{app_chunks, contains_point, page_step, select_body_chunks};
-use tui::overlay::draw_help_overlay;
+use tui::overlay::{draw_help_overlay, is_help_close_click};
 use tui::select::{
-    draw_select_screen, ensure_visible_selection, filtered_album_indices, move_selection,
-    selected_visible_position, SelectScreen,
+    draw_select_screen, ensure_visible_selection, filtered_album_indices, select_control_button_at,
+    visible_select_rows, SelectControlButton, SelectRow, SelectScreen,
 };
 use tui::state::{AlbumMouseAction, AppScreen, DownloadScreen, HelpOverlay, TuiState};
 
@@ -61,6 +64,16 @@ fn start_tui_download(
     progress: &Arc<Mutex<DownloadProgress>>,
 ) -> Option<JoinHandle<anyhow::Result<Vec<AlbumDownloadReport>>>> {
     state.start_queue();
+    start_tui_download_from_queue(api, config, albums, state, progress)
+}
+
+fn start_tui_download_from_queue(
+    api: &ApiClient,
+    config: &Config,
+    albums: &[models::AlbumBrief],
+    state: &mut TuiState,
+    progress: &Arc<Mutex<DownloadProgress>>,
+) -> Option<JoinHandle<anyhow::Result<Vec<AlbumDownloadReport>>>> {
     if state.download_queue.is_empty() {
         return None;
     }
@@ -73,7 +86,14 @@ fn start_tui_download(
     let queued_albums: Vec<_> = state
         .download_queue
         .iter()
-        .map(|&idx| (idx, albums[idx].clone()))
+        .enumerate()
+        .map(|(queue_idx, &idx)| {
+            (
+                idx,
+                albums[idx].clone(),
+                state.download_track_ids.get(queue_idx).cloned().flatten(),
+            )
+        })
         .collect();
 
     state.screen = AppScreen::Downloading;
@@ -81,7 +101,7 @@ fn start_tui_download(
     Some(tokio::spawn(async move {
         let mut downloaded = Vec::new();
         let mut failures = Vec::new();
-        for (_, album) in queued_albums {
+        for (_, album, song_ids) in queued_albums {
             let album_detail = match api_clone.get_album_detail(&album.cid).await {
                 Ok(album_detail) => album_detail,
                 Err(e) => {
@@ -99,13 +119,19 @@ fn start_tui_download(
             };
 
             if let Ok(mut prog) = progress_clone.lock() {
-                *prog = DownloadProgress::new(&album_detail.name, album_detail.songs.len());
+                let total = song_ids.as_ref().map_or(album_detail.songs.len(), Vec::len);
+                *prog = DownloadProgress::new(&album_detail.name, total);
             }
 
-            match downloader::download_album_with_progress(
+            let options = song_ids
+                .map(downloader::AlbumDownloadOptions::song_ids)
+                .unwrap_or_else(downloader::AlbumDownloadOptions::all_tracks);
+
+            match downloader::download_album_with_options_progress(
                 &api_clone,
                 &album_detail,
                 &config_clone,
+                options,
                 Some(progress_clone.clone()),
             )
             .await
@@ -138,6 +164,72 @@ fn start_tui_download(
 
         Ok(downloaded)
     }))
+}
+
+async fn expand_tui_album(
+    api: &ApiClient,
+    albums: &[models::AlbumBrief],
+    state: &mut TuiState,
+    album_idx: usize,
+    progress: &Arc<Mutex<DownloadProgress>>,
+) {
+    if let Some(album) = albums.get(album_idx) {
+        match api.get_album_detail(&album.cid).await {
+            Ok(album_detail) => state.expand_album(album_idx, album_detail),
+            Err(e) => {
+                if let Ok(mut prog) = progress.lock() {
+                    prog.push_issue(DownloadIssue::new(
+                        DownloadIssueKind::Album,
+                        album.name.as_str(),
+                        format!("Album detail error: {}", e),
+                    ));
+                }
+                state.screen = AppScreen::Downloading;
+            }
+        }
+    }
+}
+
+fn move_select_row(state: &mut TuiState, rows: &[SelectRow], delta: isize) {
+    if rows.is_empty() {
+        return;
+    }
+    let current_row = state
+        .selected_track
+        .map(|track_idx| SelectRow::Track {
+            album_idx: state.selected,
+            track_idx,
+        })
+        .unwrap_or(SelectRow::Album {
+            album_idx: state.selected,
+        });
+    let current = rows.iter().position(|row| *row == current_row).unwrap_or(0);
+    let next = if delta < 0 {
+        current.saturating_sub(delta.unsigned_abs())
+    } else {
+        (current + delta as usize).min(rows.len() - 1)
+    };
+    match rows[next] {
+        SelectRow::Album { album_idx } => {
+            state.selected = album_idx;
+            state.selected_track = None;
+        }
+        SelectRow::Track {
+            album_idx,
+            track_idx,
+        } => {
+            state.selected = album_idx;
+            state.selected_track = Some(track_idx);
+        }
+    }
+}
+
+fn toggle_focused_selection(state: &mut TuiState) {
+    if state.selected_track.is_some() {
+        state.toggle_focused_track_selection();
+    } else {
+        state.toggle_album_selection(state.selected);
+    }
 }
 
 async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
@@ -203,6 +295,20 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
             AppScreen::Select => {
                 let visible_indices = filtered_album_indices(&albums, &state.search_query);
                 ensure_visible_selection(&mut state.selected, &visible_indices);
+                if !matches!(state.expanded_album_idx, Some(idx) if visible_indices.contains(&idx))
+                {
+                    state.collapse_album();
+                }
+                let expanded_album = state
+                    .expanded_album_idx
+                    .and_then(|idx| state.album_detail_cache.get(idx))
+                    .and_then(Option::as_ref);
+                let visible_rows = visible_select_rows(
+                    &albums,
+                    &state.search_query,
+                    state.expanded_album_idx,
+                    expanded_album,
+                );
 
                 terminal.draw(|f| {
                     draw_select_screen(
@@ -210,7 +316,12 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                         SelectScreen {
                             albums: &albums,
                             selected: state.selected,
+                            selected_track: state.selected_track,
                             selected_albums: &state.selected_albums,
+                            album_track_selections: &state.album_track_selections,
+                            album_details: &state.album_detail_cache,
+                            expanded_album_idx: state.expanded_album_idx,
+                            expanded_album,
                             is_downloading: download_handle.is_some(),
                             search_query: &state.search_query,
                             search_active: state.search_active,
@@ -249,56 +360,69 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                             KeyCode::Char('2') => state.screen = AppScreen::Downloading,
                             KeyCode::Tab => state.screen = AppScreen::Downloading,
                             KeyCode::Up => {
-                                move_selection(&mut state.selected, &visible_indices, -1);
+                                move_select_row(&mut state, &visible_rows, -1);
                             }
                             KeyCode::Down => {
-                                move_selection(&mut state.selected, &visible_indices, 1);
+                                move_select_row(&mut state, &visible_rows, 1);
                             }
                             KeyCode::PageUp => {
                                 if let Ok((width, height)) = terminal_size() {
                                     let chunks = app_chunks(Rect::new(0, 0, width, height));
                                     let body = select_body_chunks(chunks[1]);
-                                    move_selection(
-                                        &mut state.selected,
-                                        &visible_indices,
-                                        -page_step(body[0]),
-                                    );
+                                    move_select_row(&mut state, &visible_rows, -page_step(body[0]));
                                 }
                             }
                             KeyCode::PageDown => {
                                 if let Ok((width, height)) = terminal_size() {
                                     let chunks = app_chunks(Rect::new(0, 0, width, height));
                                     let body = select_body_chunks(chunks[1]);
-                                    move_selection(
-                                        &mut state.selected,
-                                        &visible_indices,
-                                        page_step(body[0]),
-                                    );
+                                    move_select_row(&mut state, &visible_rows, page_step(body[0]));
                                 }
                             }
                             KeyCode::Home => {
-                                if let Some(&first) = visible_indices.first() {
-                                    state.selected = first;
+                                if let Some(first) = visible_rows.first() {
+                                    match *first {
+                                        SelectRow::Album { album_idx } => {
+                                            state.selected = album_idx;
+                                            state.selected_track = None;
+                                        }
+                                        SelectRow::Track {
+                                            album_idx,
+                                            track_idx,
+                                        } => {
+                                            state.selected = album_idx;
+                                            state.selected_track = Some(track_idx);
+                                        }
+                                    }
                                 }
                             }
                             KeyCode::End => {
-                                if let Some(&last) = visible_indices.last() {
-                                    state.selected = last;
+                                if let Some(last) = visible_rows.last() {
+                                    match *last {
+                                        SelectRow::Album { album_idx } => {
+                                            state.selected = album_idx;
+                                            state.selected_track = None;
+                                        }
+                                        SelectRow::Track {
+                                            album_idx,
+                                            track_idx,
+                                        } => {
+                                            state.selected = album_idx;
+                                            state.selected_track = Some(track_idx);
+                                        }
+                                    }
                                 }
                             }
                             KeyCode::Char(' ') => {
                                 if !visible_indices.is_empty() && download_handle.is_none() {
-                                    state.selected_albums[state.selected] =
-                                        !state.selected_albums[state.selected];
+                                    toggle_focused_selection(&mut state);
                                 }
                             }
                             code if is_key(code, 'a') && download_handle.is_none() => {
                                 let all_selected = visible_indices
                                     .iter()
                                     .all(|&idx| state.selected_albums[idx]);
-                                for &idx in &visible_indices {
-                                    state.selected_albums[idx] = !all_selected;
-                                }
+                                state.set_all_visible_albums(&visible_indices, !all_selected);
                             }
                             code if is_key(code, 'c') && download_handle.is_none() => {
                                 state.selected_albums.fill(false);
@@ -306,9 +430,24 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                             KeyCode::Enter if state.search_active => {
                                 state.search_active = false;
                             }
-                            KeyCode::Enter if download_handle.is_none() => {
+                            code if is_key(code, 'd') && download_handle.is_none() => {
                                 download_handle =
                                     start_tui_download(api, config, &albums, &mut state, &progress);
+                            }
+                            KeyCode::Enter if download_handle.is_none() => {
+                                if !visible_indices.is_empty() {
+                                    let album_idx = state.selected;
+                                    if state.expanded_album_idx == Some(album_idx)
+                                        && state.selected_track.is_none()
+                                    {
+                                        state.collapse_album();
+                                    } else {
+                                        expand_tui_album(
+                                            api, &albums, &mut state, album_idx, &progress,
+                                        )
+                                        .await;
+                                    }
+                                }
                             }
                             KeyCode::Enter => {}
                             _ => {}
@@ -319,7 +458,7 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                     let chunks = app_chunks(Rect::new(0, 0, width, height));
                                     let body = select_body_chunks(chunks[1]);
                                     if contains_point(body[0], mouse.column, mouse.row) {
-                                        move_selection(&mut state.selected, &visible_indices, -1);
+                                        move_select_row(&mut state, &visible_rows, -1);
                                     }
                                 }
                             }
@@ -328,37 +467,227 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                                     let chunks = app_chunks(Rect::new(0, 0, width, height));
                                     let body = select_body_chunks(chunks[1]);
                                     if contains_point(body[0], mouse.column, mouse.row) {
-                                        move_selection(&mut state.selected, &visible_indices, 1);
+                                        move_select_row(&mut state, &visible_rows, 1);
                                     }
                                 }
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 if let Ok((width, height)) = terminal_size() {
                                     let chunks = app_chunks(Rect::new(0, 0, width, height));
-                                    if let Some(next_screen) =
+                                    let area = Rect::new(0, 0, width, height);
+                                    if state.help_overlay == HelpOverlay::Visible
+                                        && is_help_close_click(area, mouse.column, mouse.row)
+                                    {
+                                        state.close_help();
+                                    } else if state.help_overlay == HelpOverlay::Visible {
+                                    } else if let Some(button) = download_control_button_at(
+                                        chunks[3],
+                                        mouse.column,
+                                        mouse.row,
+                                        state.confirm_quit,
+                                    ) {
+                                        match button {
+                                            DownloadControlButton::Albums => {
+                                                state.clear_selection_after_done();
+                                                state.screen = AppScreen::Select;
+                                            }
+                                            DownloadControlButton::Help => state.open_help(),
+                                            DownloadControlButton::Quit => {
+                                                if state.confirm_or_quit(&download_handle) {
+                                                    break;
+                                                }
+                                            }
+                                            DownloadControlButton::Abort => break,
+                                            DownloadControlButton::Cancel => {
+                                                state.confirm_quit = false;
+                                            }
+                                        }
+                                    } else if let Some(next_screen) =
                                         screen_from_header_click(chunks[0], mouse.column, mouse.row)
                                     {
                                         state.screen = next_screen;
+                                    } else if let Some(button) = select_control_button_at(
+                                        chunks[3],
+                                        mouse.column,
+                                        mouse.row,
+                                        state.search_active,
+                                        download_handle.is_some(),
+                                        state
+                                            .selected_albums
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(idx, selected_album)| {
+                                                **selected_album
+                                                    || state
+                                                        .album_track_selections
+                                                        .get(*idx)
+                                                        .and_then(Option::as_ref)
+                                                        .is_some_and(|selection| {
+                                                            selection
+                                                                .iter()
+                                                                .any(|&selected| selected)
+                                                        })
+                                            })
+                                            .count(),
+                                    ) {
+                                        match button {
+                                            SelectControlButton::Toggle
+                                                if download_handle.is_none()
+                                                    && !visible_indices.is_empty() =>
+                                            {
+                                                toggle_focused_selection(&mut state);
+                                            }
+                                            SelectControlButton::SelectAll
+                                                if download_handle.is_none() =>
+                                            {
+                                                let all_selected = visible_indices
+                                                    .iter()
+                                                    .all(|&idx| state.selected_albums[idx]);
+                                                state.set_all_visible_albums(
+                                                    &visible_indices,
+                                                    !all_selected,
+                                                );
+                                            }
+                                            SelectControlButton::Clear if state.search_active => {
+                                                state.clear_search();
+                                            }
+                                            SelectControlButton::Clear
+                                                if download_handle.is_none() =>
+                                            {
+                                                state.selected_albums.fill(false);
+                                                state.album_track_selections.fill(None);
+                                                state.clear_search();
+                                            }
+                                            SelectControlButton::Expand
+                                                if download_handle.is_none()
+                                                    && !visible_indices.is_empty() =>
+                                            {
+                                                let album_idx = state.selected;
+                                                if state.expanded_album_idx == Some(album_idx)
+                                                    && state.selected_track.is_none()
+                                                {
+                                                    state.collapse_album();
+                                                } else {
+                                                    expand_tui_album(
+                                                        api, &albums, &mut state, album_idx,
+                                                        &progress,
+                                                    )
+                                                    .await;
+                                                }
+                                            }
+                                            SelectControlButton::Download
+                                                if download_handle.is_none() =>
+                                            {
+                                                download_handle = start_tui_download(
+                                                    api, config, &albums, &mut state, &progress,
+                                                );
+                                            }
+                                            SelectControlButton::Switch => {
+                                                state.screen = AppScreen::Downloading;
+                                            }
+                                            SelectControlButton::Help => state.open_help(),
+                                            SelectControlButton::Quit => {
+                                                if state.confirm_or_quit(&download_handle) {
+                                                    break;
+                                                }
+                                            }
+                                            SelectControlButton::Search => {
+                                                state.search_active = true
+                                            }
+                                            SelectControlButton::Apply => {
+                                                state.search_active = false
+                                            }
+                                            SelectControlButton::Edit => {
+                                                state.search_query.pop();
+                                            }
+                                            SelectControlButton::Move => {}
+                                            _ => {}
+                                        }
                                     } else {
                                         let body = select_body_chunks(chunks[1]);
+                                        let selected_row = state
+                                            .selected_track
+                                            .map(|track_idx| SelectRow::Track {
+                                                album_idx: state.selected,
+                                                track_idx,
+                                            })
+                                            .unwrap_or(SelectRow::Album {
+                                                album_idx: state.selected,
+                                            });
+                                        let selected_visible = visible_rows
+                                            .iter()
+                                            .position(|row| *row == selected_row)
+                                            .unwrap_or(0);
+                                        let track_rows: Vec<_> = visible_rows
+                                            .iter()
+                                            .map(|row| matches!(row, SelectRow::Track { .. }))
+                                            .collect();
                                         if let Some(action) = album_mouse_action(
-                                            selected_visible_position(
-                                                &visible_indices,
-                                                state.selected,
-                                            ),
-                                            visible_indices.len(),
+                                            selected_visible,
+                                            visible_rows.len(),
                                             body[0],
                                             mouse.column,
                                             mouse.row,
+                                            &track_rows,
                                         ) {
-                                            let AlbumMouseAction::Toggle(index) = action;
-                                            if let Some(&album_index) = visible_indices.get(index) {
-                                                state.selected = album_index;
-                                                if matches!(action, AlbumMouseAction::Toggle(_))
-                                                    && download_handle.is_none()
-                                                {
-                                                    state.selected_albums[state.selected] =
-                                                        !state.selected_albums[state.selected];
+                                            let index = match action {
+                                                AlbumMouseAction::Focus(index)
+                                                | AlbumMouseAction::Toggle(index) => index,
+                                            };
+                                            if let Some(row) = visible_rows.get(index).copied() {
+                                                let now = Instant::now();
+                                                match row {
+                                                    SelectRow::Album { album_idx } => {
+                                                        let double_clicked = matches!(
+                                                            state.last_album_click,
+                                                            Some((last_index, last_time))
+                                                                if last_index == album_idx
+                                                                    && now.duration_since(last_time)
+                                                                        <= Duration::from_millis(400)
+                                                        );
+                                                        state.selected = album_idx;
+                                                        state.selected_track = None;
+                                                        if matches!(
+                                                            action,
+                                                            AlbumMouseAction::Toggle(_)
+                                                        ) && download_handle.is_none()
+                                                        {
+                                                            state.toggle_album_selection(
+                                                                state.selected,
+                                                            );
+                                                            state.last_album_click = None;
+                                                        } else if double_clicked {
+                                                            if state.expanded_album_idx
+                                                                == Some(album_idx)
+                                                            {
+                                                                state.collapse_album();
+                                                            } else {
+                                                                expand_tui_album(
+                                                                    api, &albums, &mut state,
+                                                                    album_idx, &progress,
+                                                                )
+                                                                .await;
+                                                            }
+                                                        } else {
+                                                            state.last_album_click =
+                                                                Some((album_idx, now));
+                                                        }
+                                                    }
+                                                    SelectRow::Track {
+                                                        album_idx,
+                                                        track_idx,
+                                                    } => {
+                                                        state.selected = album_idx;
+                                                        state.selected_track = Some(track_idx);
+                                                        if matches!(
+                                                            action,
+                                                            AlbumMouseAction::Toggle(_)
+                                                        ) && download_handle.is_none()
+                                                        {
+                                                            state.toggle_focused_track_selection();
+                                                        }
+                                                        state.last_album_click = None;
+                                                    }
                                                 }
                                             }
                                         }
@@ -437,7 +766,13 @@ async fn run_tui(api: &ApiClient, config: &Config) -> anyhow::Result<()> {
                             if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
                                 if let Ok((width, height)) = terminal_size() {
                                     let chunks = app_chunks(Rect::new(0, 0, width, height));
-                                    if let Some(next_screen) =
+                                    let area = Rect::new(0, 0, width, height);
+                                    if state.help_overlay == HelpOverlay::Visible
+                                        && is_help_close_click(area, mouse.column, mouse.row)
+                                    {
+                                        state.close_help();
+                                    } else if state.help_overlay == HelpOverlay::Visible {
+                                    } else if let Some(next_screen) =
                                         screen_from_header_click(chunks[0], mouse.column, mouse.row)
                                     {
                                         if next_screen == AppScreen::Select {
@@ -559,11 +894,20 @@ async fn main() -> anyhow::Result<()> {
             cli.exact,
             cli.dry_run,
             cli_progress_mode,
+            cli.tracks.as_deref(),
         )
         .await?;
         !cli.dry_run
     } else if let Some(ids) = cli.album_id {
-        cli::download_albums_by_id(&api, &config, &ids, cli.dry_run, cli_progress_mode).await?;
+        cli::download_albums_by_id(
+            &api,
+            &config,
+            &ids,
+            cli.dry_run,
+            cli_progress_mode,
+            cli.tracks.as_deref(),
+        )
+        .await?;
         !cli.dry_run
     } else if cli.all {
         cli::download_all(&api, &config, cli_progress_mode, cli.dry_run).await?;
@@ -582,6 +926,7 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use msr_downloader::models::AlbumBrief;
+    use tui::select::move_selection;
 
     fn album(name: &str) -> models::AlbumBrief {
         models::AlbumBrief {
@@ -628,14 +973,24 @@ mod tests {
         let header = Rect::new(0, 0, 100, 3);
 
         assert_eq!(
-            screen_from_header_click(header, 1, 1),
+            screen_from_header_click(header, 2, 1),
+            Some(AppScreen::Select)
+        );
+        assert_eq!(
+            screen_from_header_click(header, 11, 1),
             Some(AppScreen::Select)
         );
         assert_eq!(
             screen_from_header_click(header, 16, 1),
             Some(AppScreen::Downloading)
         );
-        assert_eq!(screen_from_header_click(header, 40, 1), None);
+        assert_eq!(
+            screen_from_header_click(header, 27, 1),
+            Some(AppScreen::Downloading)
+        );
+        assert_eq!(screen_from_header_click(header, 1, 1), None);
+        assert_eq!(screen_from_header_click(header, 15, 1), None);
+        assert_eq!(screen_from_header_click(header, 41, 1), None);
         assert_eq!(screen_from_header_click(header, 1, 2), None);
     }
 
@@ -644,14 +999,30 @@ mod tests {
         let list_area = Rect::new(0, 3, 64, 20);
 
         assert_eq!(
-            album_mouse_action(0, 10, list_area, 2, 4),
+            album_mouse_action(0, 10, list_area, 4, 4, &[false; 10]),
             Some(AlbumMouseAction::Toggle(0))
         );
         assert_eq!(
-            album_mouse_action(0, 10, list_area, 6, 4),
-            Some(AlbumMouseAction::Toggle(0))
+            album_mouse_action(0, 10, list_area, 8, 4, &[false; 10]),
+            Some(AlbumMouseAction::Focus(0))
         );
-        assert_eq!(album_mouse_action(0, 10, list_area, 70, 4), None);
+        assert_eq!(
+            album_mouse_action(0, 10, list_area, 2, 4, &[false; 10]),
+            Some(AlbumMouseAction::Focus(0))
+        );
+        let track_rows = [false, true, false];
+        assert_eq!(
+            album_mouse_action(0, 3, list_area, 6, 5, &track_rows),
+            Some(AlbumMouseAction::Toggle(1))
+        );
+        assert_eq!(
+            album_mouse_action(0, 3, list_area, 4, 5, &track_rows),
+            Some(AlbumMouseAction::Focus(1))
+        );
+        assert_eq!(
+            album_mouse_action(0, 10, list_area, 70, 4, &[false; 10]),
+            None
+        );
     }
 
     #[test]
@@ -708,10 +1079,16 @@ mod tests {
         assert_eq!(state.help_overlay, HelpOverlay::Hidden);
         assert!(state.downloaded_names.is_empty());
         assert!(state.download_queue.is_empty());
+        assert!(state.download_track_ids.is_empty());
         assert_eq!(state.download_current, 0);
         assert!(!state.transfer_done);
         assert_eq!(state.active_album_idx, 0);
         assert!(!state.confirm_quit);
+        assert_eq!(state.expanded_album_idx, None);
+        assert_eq!(state.album_detail_cache.len(), 5);
+        assert!(state.album_detail_cache.iter().all(Option::is_none));
+        assert_eq!(state.album_track_selections, vec![None; 5]);
+        assert_eq!(state.selected_track, None);
     }
 
     #[test]
@@ -746,6 +1123,7 @@ mod tests {
         state.start_queue();
 
         assert_eq!(state.download_queue, vec![0, 2, 4]);
+        assert_eq!(state.download_track_ids, vec![None, None, None]);
         assert_eq!(state.download_current, 0);
         assert!(state.downloaded_names.is_empty());
         assert!(!state.transfer_done);
@@ -764,6 +1142,85 @@ mod tests {
     }
 
     #[test]
+    fn tui_state_start_queue_uses_partially_selected_song_ids() {
+        let mut state = TuiState::new(2);
+        state.expand_album(
+            1,
+            models::AlbumDetail {
+                cid: "album".to_string(),
+                name: "Album".to_string(),
+                intro: String::new(),
+                belong: String::new(),
+                cover_url: String::new(),
+                cover_de_url: String::new(),
+                songs: vec![
+                    models::SongBrief {
+                        cid: "one".to_string(),
+                        name: "One".to_string(),
+                        artists: Vec::new(),
+                    },
+                    models::SongBrief {
+                        cid: "two".to_string(),
+                        name: "Two".to_string(),
+                        artists: Vec::new(),
+                    },
+                ],
+            },
+        );
+        state.album_track_selections[1] = Some(vec![false, true]);
+
+        state.start_queue();
+
+        assert_eq!(state.download_queue, vec![1]);
+        assert_eq!(
+            state.download_track_ids,
+            vec![Some(vec!["two".to_string()])]
+        );
+    }
+
+    #[test]
+    fn tui_state_track_toggles_promote_all_tracks_to_full_album() {
+        let mut state = TuiState::new(1);
+        state.expand_album(
+            0,
+            models::AlbumDetail {
+                cid: "album".to_string(),
+                name: "Album".to_string(),
+                intro: String::new(),
+                belong: String::new(),
+                cover_url: String::new(),
+                cover_de_url: String::new(),
+                songs: vec![
+                    models::SongBrief {
+                        cid: "one".to_string(),
+                        name: "One".to_string(),
+                        artists: Vec::new(),
+                    },
+                    models::SongBrief {
+                        cid: "two".to_string(),
+                        name: "Two".to_string(),
+                        artists: Vec::new(),
+                    },
+                ],
+            },
+        );
+
+        state.selected_track = Some(0);
+        state.toggle_focused_track_selection();
+        assert_eq!(state.selected_albums, vec![false]);
+        assert_eq!(state.album_track_selections[0], Some(vec![true, false]));
+
+        state.selected_track = Some(1);
+        state.toggle_focused_track_selection();
+        assert_eq!(state.selected_albums, vec![true]);
+        assert_eq!(state.album_track_selections[0], None);
+
+        state.start_queue();
+        assert_eq!(state.download_queue, vec![0]);
+        assert_eq!(state.download_track_ids, vec![None]);
+    }
+
+    #[test]
     fn tui_state_clear_selection_after_done_clears_when_done() {
         let mut state = TuiState::new(3);
         state.selected_albums = vec![true, true, false];
@@ -772,6 +1229,7 @@ mod tests {
         state.clear_selection_after_done();
 
         assert_eq!(state.selected_albums, vec![false, false, false]);
+        assert_eq!(state.album_track_selections, vec![None, None, None]);
     }
 
     #[test]
@@ -824,6 +1282,38 @@ mod tests {
         let error = cli::validate_cli_action(&cli).unwrap_err().to_string();
 
         assert!(error.contains("use either --album or --album-id"));
+    }
+
+    #[test]
+    fn cli_tracks_parse_and_validate() {
+        let cli = cli::Cli::try_parse_from([
+            "msr-downloader",
+            "--cli",
+            "--album-id",
+            "123",
+            "--tracks",
+            "1,3,5-7",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.tracks.as_deref(), Some("1,3,5-7"));
+        assert_eq!(
+            cli::parse_track_selection_spec("1,3,5-7").unwrap(),
+            vec![1, 3, 5, 6, 7]
+        );
+        assert!(cli::validate_cli_action(&cli).is_ok());
+        assert!(cli::parse_track_selection_spec("3-1").is_err());
+        assert!(cli::parse_track_selection_spec("0").is_err());
+    }
+
+    #[test]
+    fn cli_tracks_rejects_all_downloads() {
+        let cli = cli::Cli::try_parse_from(["msr-downloader", "--cli", "--all", "--tracks", "1"])
+            .unwrap();
+        let error = cli::validate_cli_action(&cli).unwrap_err().to_string();
+
+        assert!(error.contains("--tracks"));
+        assert!(error.contains("--all"));
     }
 
     #[test]
@@ -962,6 +1452,7 @@ mod tests {
             false,
             false,
             cli_progress::CliProgressMode::Summary,
+            None,
         )
         .await
         .unwrap_err()

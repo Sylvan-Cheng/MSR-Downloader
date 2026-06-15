@@ -12,7 +12,7 @@ pub(crate) fn screen_from_header_click(header: Rect, x: u16, y: u16) -> Option<A
         return None;
     }
 
-    let content_x = header.x + 1;
+    let content_x = header.x + 2;
     let albums_start = content_x;
     let albums_end = albums_start + "ALBUMS [1]".len() as u16;
     let transfer_start = albums_end + 4;
@@ -29,12 +29,13 @@ pub(crate) fn screen_from_header_click(header: Rect, x: u16, y: u16) -> Option<A
 
 pub(crate) fn album_mouse_action(
     selected_visible: usize,
-    album_count: usize,
+    row_count: usize,
     list_area: Rect,
     mouse_x: u16,
     mouse_y: u16,
+    track_rows: &[bool],
 ) -> Option<AlbumMouseAction> {
-    if album_count == 0 || !contains_point(list_area, mouse_x, mouse_y) {
+    if row_count == 0 || !contains_point(list_area, mouse_x, mouse_y) {
         return None;
     }
 
@@ -58,9 +59,20 @@ pub(crate) fn album_mouse_action(
         .saturating_sub(visible_rows);
     let row = mouse_y.saturating_sub(content_top) as usize;
     let index = start + row;
-    if index >= album_count {
+    if index >= row_count {
         return None;
     }
 
-    Some(AlbumMouseAction::Toggle(index))
+    let checkbox_offset = if track_rows.get(index).copied().unwrap_or(false) {
+        4
+    } else {
+        2
+    };
+    let checkbox_start = content_left.saturating_add(checkbox_offset);
+    let checkbox_end = checkbox_start.saturating_add(3);
+    if mouse_x >= checkbox_start && mouse_x < checkbox_end {
+        Some(AlbumMouseAction::Toggle(index))
+    } else {
+        Some(AlbumMouseAction::Focus(index))
+    }
 }

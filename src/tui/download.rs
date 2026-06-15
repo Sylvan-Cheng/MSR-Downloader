@@ -1,6 +1,4 @@
-use crate::tui::chrome::{
-    controls_line, create_block, draw_app_header, draw_controls_bar, draw_status_bar,
-};
+use crate::tui::chrome::{create_block, draw_app_header, draw_controls_bar, draw_status_bar};
 use crate::tui::layout::app_chunks;
 use crate::tui::state::{AppScreen, DownloadScreen};
 use crate::tui::theme::{
@@ -18,10 +16,56 @@ use ratatui::{
 };
 use std::sync::{Arc, Mutex};
 
-const DOWNLOAD_CONTROLS: &[(&str, &str)] =
-    &[("Tab", " SWITCH  "), ("?", " HELP  "), ("Q", " QUIT")];
-const DOWNLOAD_CONFIRM_CONTROLS: &[(&str, &str)] =
-    &[("Y", " ABORT  "), ("N", " CANCEL  "), ("Esc", " CANCEL")];
+const DOWNLOAD_CONTROLS: &[(&str, &str)] = &[("Albums", ""), ("Help", ""), ("Quit", "")];
+const DOWNLOAD_CONFIRM_CONTROLS: &[(&str, &str)] = &[("Abort", ""), ("Cancel", "")];
+const DOWNLOAD_PROMPT: &str = "Tab albums | ? help | q quit | ";
+const DOWNLOAD_CONFIRM_PROMPT: &str = "Abort transfer? Partial files are resumable | ";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DownloadControlButton {
+    Albums,
+    Help,
+    Quit,
+    Abort,
+    Cancel,
+}
+
+pub(crate) fn download_control_button_at(
+    area: ratatui::layout::Rect,
+    x: u16,
+    y: u16,
+    confirm_quit: bool,
+) -> Option<DownloadControlButton> {
+    if y != area.y + 1 || x < area.x + 2 {
+        return None;
+    }
+    let prompt = if confirm_quit {
+        DOWNLOAD_CONFIRM_PROMPT
+    } else {
+        DOWNLOAD_PROMPT
+    };
+    let mut cursor = area.x + 2 + prompt.len() as u16;
+    for &(key, label) in download_control_items(confirm_quit) {
+        let label_width = if label.trim().is_empty() {
+            0
+        } else {
+            1 + label.trim().len() as u16
+        };
+        let width = 3 + key.len() as u16 + label_width;
+        if x >= cursor && x < cursor.saturating_add(width) {
+            return match key {
+                "Albums" => Some(DownloadControlButton::Albums),
+                "Help" => Some(DownloadControlButton::Help),
+                "Quit" => Some(DownloadControlButton::Quit),
+                "Abort" => Some(DownloadControlButton::Abort),
+                "Cancel" => Some(DownloadControlButton::Cancel),
+                _ => None,
+            };
+        }
+        cursor = cursor.saturating_add(width + 1);
+    }
+    None
+}
 
 pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen<'_>) {
     let DownloadScreen {
@@ -265,11 +309,7 @@ pub(crate) fn draw_download_screen(f: &mut ratatui::Frame, state: DownloadScreen
         reports,
     );
     draw_status_bar(f, chunks[2], status_text);
-    draw_controls_bar(
-        f,
-        chunks[3],
-        controls_line(download_control_items(confirm_quit)),
-    );
+    draw_controls_bar(f, chunks[3], download_controls_line(confirm_quit));
 }
 
 pub(crate) fn download_status_text(
@@ -388,6 +428,21 @@ pub(crate) fn download_controls_text(confirm_quit: bool) -> String {
     crate::tui::chrome::controls_text(download_control_items(confirm_quit))
 }
 
+fn download_controls_line(confirm_quit: bool) -> Line<'static> {
+    let prompt = if confirm_quit {
+        DOWNLOAD_CONFIRM_PROMPT
+    } else {
+        DOWNLOAD_PROMPT
+    };
+    let mut spans = vec![Span::raw(prompt)];
+    for &(key, _) in download_control_items(confirm_quit) {
+        spans.push(Span::raw("["));
+        spans.push(Span::styled(key, Style::default().fg(COLOR_INFO)));
+        spans.push(Span::raw("] "));
+    }
+    Line::from(spans)
+}
+
 fn download_control_items(confirm_quit: bool) -> &'static [(&'static str, &'static str)] {
     if confirm_quit {
         DOWNLOAD_CONFIRM_CONTROLS
@@ -467,10 +522,27 @@ mod tests {
 
     #[test]
     fn download_controls_follow_confirmation_mode() {
-        assert_eq!(download_controls_text(false), "Tab SWITCH  ? HELP  Q QUIT");
+        assert_eq!(download_controls_text(false), "[Albums] [Help] [Quit] ");
+        assert_eq!(download_controls_text(true), "[Abort] [Cancel] ");
+    }
+
+    #[test]
+    fn download_control_hit_testing_uses_rendered_padding() {
+        let area = ratatui::layout::Rect::new(0, 20, 100, 3);
+        let albums_x = area.x + 2 + DOWNLOAD_PROMPT.len() as u16 + 1;
+        let abort_x = area.x + 2 + DOWNLOAD_CONFIRM_PROMPT.len() as u16 + 1;
+
         assert_eq!(
-            download_controls_text(true),
-            "Y ABORT  N CANCEL  Esc CANCEL"
+            download_control_button_at(area, albums_x, area.y + 1, false),
+            Some(DownloadControlButton::Albums)
+        );
+        assert_eq!(
+            download_control_button_at(area, abort_x, area.y + 1, true),
+            Some(DownloadControlButton::Abort)
+        );
+        assert_eq!(
+            download_control_button_at(area, area.x + 1, area.y + 1, false),
+            None
         );
     }
 }
