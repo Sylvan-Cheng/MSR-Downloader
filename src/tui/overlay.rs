@@ -1,9 +1,9 @@
 use crate::tui::chrome::create_block;
 use crate::tui::layout::{centered_rect, contains_point};
-use crate::tui::theme::{COLOR_INFO, COLOR_PRIMARY};
+use crate::tui::theme::{COLOR_INFO, COLOR_PANEL, COLOR_PRIMARY};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph, Wrap},
 };
@@ -30,7 +30,7 @@ pub(crate) fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
         ]),
     ];
     let help = Paragraph::new(lines)
-        .style(Style::default().bg(Color::Rgb(6, 10, 12)))
+        .style(Style::default().bg(COLOR_PANEL))
         .block(create_block("HELP", COLOR_PRIMARY))
         .wrap(Wrap { trim: true });
     f.render_widget(Clear, popup);
@@ -38,17 +38,17 @@ pub(crate) fn draw_help_overlay(f: &mut ratatui::Frame, area: Rect) {
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw("["),
-            Span::styled("Close", Style::default().fg(COLOR_PRIMARY)),
+            Span::styled("X", Style::default().fg(COLOR_PRIMARY)),
             Span::raw("]"),
         ]))
-        .style(Style::default().bg(Color::Rgb(6, 10, 12))),
+        .style(Style::default().bg(COLOR_PANEL)),
         help_close_button(area),
     );
 }
 
 pub(crate) fn help_close_button(area: Rect) -> Rect {
     let popup = centered_rect(70, 70, area);
-    Rect::new(popup.x + popup.width.saturating_sub(11), popup.y + 1, 8, 1)
+    Rect::new(popup.x + popup.width.saturating_sub(5), popup.y, 3, 1)
 }
 
 pub(crate) fn is_help_close_click(area: Rect, x: u16, y: u16) -> bool {
@@ -64,6 +64,7 @@ mod tests {
         let area = Rect::new(0, 0, 120, 40);
         let button = help_close_button(area);
 
+        assert_eq!(button.width, 3);
         assert!(is_help_close_click(area, button.x, button.y));
         assert!(is_help_close_click(
             area,

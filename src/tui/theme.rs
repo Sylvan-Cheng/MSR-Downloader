@@ -8,6 +8,7 @@ pub(crate) const COLOR_WARNING: Color = Color::Rgb(214, 218, 216);
 pub(crate) const COLOR_ERROR: Color = Color::Rgb(238, 89, 82);
 pub(crate) const COLOR_INFO: Color = Color::Rgb(0, 216, 198);
 pub(crate) const COLOR_MUTED: Color = Color::Rgb(92, 98, 100);
+pub(crate) const COLOR_PANEL: Color = Color::Rgb(16, 20, 22);
 
 pub(crate) fn tui_status_style(status: SongStatus) -> Style {
     match status {
