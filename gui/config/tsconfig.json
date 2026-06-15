@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "isolatedModules": true,
+    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "useDefineForClassFields": true
+  },
+  "include": ["../src/**/*.ts", "../src/**/*.svelte", "vite.config.ts"]
+}

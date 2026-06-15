@@ -1,0 +1,26 @@
+{
+  "name": "msr-downloader-gui",
+  "private": true,
+  "version": "0.4.0",
+  "packageManager": "pnpm@11.6.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config gui/config/vite.config.ts --host 127.0.0.1",
+    "build": "vite build --config gui/config/vite.config.ts",
+    "preview": "vite preview --config gui/config/vite.config.ts",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.9.0",
+    "svelte": "^5.46.4",
+    "vite": "^8.0.16"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@tauri-apps/cli": "^2.9.5",
+    "autoprefixer": "^10.4.23",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5.9.3"
+  }
+}

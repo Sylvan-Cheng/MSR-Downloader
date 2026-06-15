@@ -1,5 +1,7 @@
 # Rust
 /target/
+src-tauri/target/
+src-tauri/gen/
 **/*.rs.bk
 
 # Python
@@ -11,6 +13,14 @@ dist/
 build/
 .venv/
 *.egg
+
+# Node / Tauri frontend
+node_modules/
+.svelte-kit/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # IDE
 .idea/

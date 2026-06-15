@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "types": ["svelte"]
+  }
+}
